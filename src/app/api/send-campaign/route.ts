@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 
-// Safe random delay to mimic authentic human behavior (1.5 to 2.5 seconds)
-const sleepRandom = (min = 1500, max = 2500): Promise<void> => {
+// 🔒 4.5s से 5.0s का सुरक्षित रैंडम डिले (Gmail Anti-Spam Human Mimicking)
+const sleepRandom = (min = 4500, max = 5000): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
@@ -12,7 +12,7 @@ const pickRandom = (arr: string[]): string => {
   return arr[Math.floor(Math.random() * arr.length)];
 };
 
-// Spintax variation banks to prevent spam filter triggers
+// 🎯 Spintax Variation Banks (100% Inbox Placement Formula)
 const GREETINGS = ["Hi,", "Hello,", "Hey,", "Hi there,"];
 const OPENERS = [
   "Hope you are having a productive week.",
@@ -94,7 +94,7 @@ export async function POST(req: Request) {
 
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
 
-    // 6. Sequential Email Dispatch Loop with Human Randomization
+    // 6. Sequential Email Dispatch Loop with Human Randomization & Dynamic Variations
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
 
@@ -102,8 +102,10 @@ export async function POST(req: Request) {
       const randomOpener = pickRandom(OPENERS);
       const randomSignOff = pickRandom(SIGN_OFFS);
 
-      // Clean leading greetings if already present in template
-      const cleanUserBody = template.trim().replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "");
+      // Clean leading greetings/openers if user accidentally included them in template box
+      let cleanUserBody = template.trim()
+        .replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "")
+        .replace(/^(hope this note finds you well|hope you are having a productive week|reaching out to quickly connect)[^\n]*\n+/i, "");
 
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n${cleanName}`;
 
@@ -137,16 +139,16 @@ export async function POST(req: Request) {
 
         logs.push({ email: recipientEmail, status: "SUCCESS" });
 
-        // Natural human delay between emails in the current batch
+        // Natural human delay (4.5s to 5.0s) between emails in the chunk
         if (i < recipients.length - 1) {
-          await sleepRandom(1500, 2500);
+          await sleepRandom(4500, 5000);
         }
       } catch (err: any) {
         logs.push({ email: recipientEmail, status: "FAILED", error: err.message || "Failed to dispatch email" });
       }
     }
 
-    // Return logs + new 24-hour cryptographic sessionToken for client caching
+    // Return logs + refreshed 24-hour cryptographic sessionToken for client caching
     return NextResponse.json({ 
       report: logs,
       sessionToken: guard.sessionToken 

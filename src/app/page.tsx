@@ -14,6 +14,7 @@ const SESSION_TOKEN_KEY = "reachout_daily_session_token";
 const DEFAULT_BATCH_SIZE = 15;
 const MAX_ALLOWED_BATCH_SIZE = 50;
 const MIN_ALLOWED_BATCH_SIZE = 1;
+const CHUNK_SIZE = 6; // 👈 6 ईमेल्स प्रति API कॉल (100% Vercel & Spam Safe)
 
 export default function Home() {
   const [senderName, setSenderName] = useState("Babu");
@@ -29,6 +30,7 @@ export default function Home() {
   const [allEmails, setAllEmails] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [loading, setLoading] = useState(false);
+  const [progressStatus, setProgressStatus] = useState<string>("");
   const [report, setReport] = useState<ReportItem[]>([]);
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
 
@@ -152,50 +154,79 @@ export default function Home() {
     }
 
     setLoading(true);
+    let currentReportState = [...report];
+    let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+    let processedInThisBatch = 0;
 
     try {
       const machineId = getClientMachineId();
-      const storedToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
-      const res = await fetch("/api/send-campaign", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          senderName: activeName.trim(),
-          senderEmail: activeEmail.trim().toLowerCase(),
-          appPassword: activePass.replace(/\s+/g, ""),
-          recipients: batchToSend,
-          subject: activeSub.trim(),
-          template: activeTmpl.trim(),
-          machineId,
-          sessionToken: storedToken,
-        }),
-      });
+      // 🚀 6-6 के चंक्स में सीक्वेंशियल लूप
+      for (let i = 0; i < batchToSend.length; i += CHUNK_SIZE) {
+        const chunk = batchToSend.slice(i, i + CHUNK_SIZE);
+        const startNum = i + 1;
+        const endNum = Math.min(i + CHUNK_SIZE, batchToSend.length);
 
-      const data = await res.json();
-      if (res.ok) {
+        setProgressStatus(`Dispatching batch leads ${startNum} to ${endNum} of ${batchToSend.length}...`);
+
+        const res = await fetch("/api/send-campaign", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            senderName: activeName.trim(),
+            senderEmail: activeEmail.trim().toLowerCase(),
+            appPassword: activePass.replace(/\s+/g, ""),
+            recipients: chunk,
+            subject: activeSub.trim(),
+            template: activeTmpl.trim(),
+            machineId,
+            sessionToken: latestSessionToken,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          alert(`Execution Error: ${data.error || "Delivery halted unexpectedly"}`);
+          break;
+        }
+
         if (data.sessionToken) {
-          localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          latestSessionToken = data.sessionToken;
+          localStorage.setItem(SESSION_TOKEN_KEY, latestSessionToken);
         }
 
-        const updatedReport = [...report, ...data.report];
-        const nextIdx = startIdx + batchToSend.length;
+        // रिपोर्ट अपडेट करें
+        const chunkResults: ReportItem[] = data.report || [];
+        currentReportState = [...currentReportState, ...chunkResults];
+        processedInThisBatch += chunk.length;
 
-        setReport(updatedReport);
-        setCurrentIndex(nextIdx);
+        setReport([...currentReportState]);
+        setCurrentIndex(startIdx + processedInThisBatch);
+        saveState(
+          emailList,
+          startIdx + processedInThisBatch,
+          currentReportState,
+          activeName,
+          activeEmail,
+          activeSub,
+          activeTmpl,
+          size,
+          true
+        );
+      }
 
-        saveState(emailList, nextIdx, updatedReport, activeName, activeEmail, activeSub, activeTmpl, size, true);
-
-        if (nextIdx < emailList.length) {
-          alert(`✅ Batch completed (${startIdx + 1} to ${nextIdx})!\nYou can now change the Sender Account and App Password for the next batch.`);
-        }
-      } else {
-        alert(data.error || "Delivery error occurred during execution!");
+      const finalIdx = startIdx + processedInThisBatch;
+      if (finalIdx < emailList.length && processedInThisBatch === batchToSend.length) {
+        alert(
+          `✅ Batch completed (${startIdx + 1} to ${finalIdx})!\nYou can now change the Sender Account and App Password for the next batch.`
+        );
       }
     } catch (err) {
       alert("Failed to connect to the server. Please check your connection!");
     } finally {
       setLoading(false);
+      setProgressStatus("");
     }
   };
 
@@ -227,6 +258,7 @@ export default function Home() {
       setRawSheetData("");
       setAppPassword("");
       setBatchSize(DEFAULT_BATCH_SIZE);
+      setProgressStatus("");
     }
   };
 
@@ -246,7 +278,7 @@ export default function Home() {
               ReachOut Multi-Account Rotator
             </h1>
             <p className="text-slate-400 text-xs mt-0.5">
-              Rotate Gmail accounts per batch | 100% Direct SMTP Inboxing
+              Rotate Gmail accounts per batch | 4.5s - 5.0s Anti-Spam Human Pacing
             </p>
           </div>
           <button
@@ -278,6 +310,14 @@ export default function Home() {
             <p className="text-xl font-bold text-amber-400 mt-1">{remainingCount}</p>
           </div>
         </div>
+
+        {/* Live Progress Bar Notification */}
+        {loading && (
+          <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl flex items-center gap-3">
+            <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
+            <p className="text-xs font-mono text-blue-300 font-semibold">{progressStatus}</p>
+          </div>
+        )}
 
         {/* STEP 1: INITIAL CAMPAIGN SETUP */}
         {!isCampaignStarted ? (
@@ -397,9 +437,16 @@ export default function Home() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50"
+              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2"
             >
-              {loading ? "Dispatching Batch 1..." : `🚀 Start Campaign & Send First ${batchSize || DEFAULT_BATCH_SIZE} Leads`}
+              {loading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <span>Dispatching Batch 1...</span>
+                </>
+              ) : (
+                `🚀 Start Campaign & Send First ${batchSize || DEFAULT_BATCH_SIZE} Leads`
+              )}
             </button>
           </form>
         ) : (
@@ -508,9 +555,16 @@ export default function Home() {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50"
+                  className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2"
                 >
-                  {loading ? "Dispatching next batch..." : `▶ Dispatch Next Batch (${currentBatchTarget} Leads)`}
+                  {loading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>Dispatching Next Batch...</span>
+                    </>
+                  ) : (
+                    `▶ Dispatch Next Batch (${currentBatchTarget} Leads)`
+                  )}
                 </button>
               </form>
             ) : (
