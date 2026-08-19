@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
+import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 
-// Safe random delay to mimic human behavior (1.5 to 2.5 seconds)
+// Safe random delay to mimic authentic human behavior (1.5 to 2.5 seconds)
 const sleepRandom = (min = 1500, max = 2500): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -11,6 +12,7 @@ const pickRandom = (arr: string[]): string => {
   return arr[Math.floor(Math.random() * arr.length)];
 };
 
+// Spintax variation banks to prevent spam filter triggers
 const GREETINGS = ["Hi,", "Hello,", "Hey,", "Hi there,"];
 const OPENERS = [
   "Hope you are having a productive week.",
@@ -20,19 +22,44 @@ const OPENERS = [
 ];
 const SIGN_OFFS = ["Best regards,", "Thanks & regards,", "Warm regards,", "Best,"];
 
-// Set function duration limit for Vercel
-export const maxDuration = 60; 
+// Execution timeout configuration for Vercel Serverless Functions
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { senderName, senderEmail, appPassword, recipients, subject, template } = body;
+    const { 
+      senderName, 
+      senderEmail, 
+      appPassword, 
+      recipients, 
+      subject, 
+      template, 
+      machineId,
+      sessionToken 
+    } = body;
 
-    // Validate fields
+    // 1. Mandatory Input Fields Validation
     if (!senderEmail || !appPassword || !recipients?.length || !subject || !template) {
       return NextResponse.json(
-        { error: "Please fill in all fields (Sender Email, App Password, Leads, Subject, Body)." },
+        { error: "Please fill in all required fields (Sender Email, App Password, Leads, Subject, Body)." },
         { status: 400 }
+      );
+    }
+
+    // 2. Extract Host / App Domain from Request Headers
+    const hostHeader =
+      req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost";
+
+    // 3. License, App Domain Whitelist, Device Lock & 24-Hour Cache Check
+    const guard = await verifyLicenseAndDevice(hostHeader, machineId, sessionToken);
+    if (!guard.ok) {
+      return NextResponse.json(
+        { 
+          error: guard.error || "License verification failed or device unauthorized.",
+          clearSession: guard.clearClientSession || false 
+        },
+        { status: 403 }
       );
     }
 
@@ -40,22 +67,34 @@ export async function POST(req: Request) {
     const cleanPassword = appPassword.replace(/\s+/g, "");
     const cleanName = (senderName || "Babu").trim();
 
-    // Setup Gmail SMTP transport with hostname masking
+    // 4. Dynamic SMTP Setup (Auto-Detect Zoho vs Gmail)
+    const isZoho = cleanSender.includes("@zoho") || !cleanSender.endsWith("@gmail.com");
+    const smtpHost = isZoho ? "smtppro.zoho.in" : "smtp.gmail.com";
+
     const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
+      host: smtpHost,
       port: 465,
       secure: true,
       auth: {
         user: cleanSender,
         pass: cleanPassword,
       },
-      name: "mail.google.com",
+      name: isZoho ? "zoho.com" : "mail.google.com",
     });
 
-    await transporter.verify();
+    // 5. Verify SMTP Credentials before dispatching loop
+    try {
+      await transporter.verify();
+    } catch (authErr: any) {
+      return NextResponse.json(
+        { error: `Authentication failed on ${smtpHost}. Check your email ID or 16-digit App Password.` },
+        { status: 401 }
+      );
+    }
 
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
 
+    // 6. Sequential Email Dispatch Loop with Human Randomization
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
 
@@ -63,10 +102,11 @@ export async function POST(req: Request) {
       const randomOpener = pickRandom(OPENERS);
       const randomSignOff = pickRandom(SIGN_OFFS);
 
-      let cleanUserBody = template.trim().replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "");
+      // Clean leading greetings if already present in template
+      const cleanUserBody = template.trim().replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "");
 
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n${cleanName}`;
-      
+
       const htmlContent = `
 <!DOCTYPE html>
 <html>
@@ -80,8 +120,10 @@ export async function POST(req: Request) {
 </html>
       `.trim();
 
+      // Custom RFC-compliant Message-ID header matching sender domain for high inbox delivery
       const randomHex = Math.random().toString(36).substring(2, 15);
-      const customMessageId = `<${Date.now()}.${randomHex}@mail.gmail.com>`;
+      const domainPart = cleanSender.split("@")[1] || "mail.com";
+      const customMessageId = `<${Date.now()}.${randomHex}@${domainPart}>`;
 
       try {
         await transporter.sendMail({
@@ -95,18 +137,23 @@ export async function POST(req: Request) {
 
         logs.push({ email: recipientEmail, status: "SUCCESS" });
 
+        // Natural human delay between emails in the current batch
         if (i < recipients.length - 1) {
           await sleepRandom(1500, 2500);
         }
       } catch (err: any) {
-        logs.push({ email: recipientEmail, status: "FAILED", error: "Failed to send: " + err.message });
+        logs.push({ email: recipientEmail, status: "FAILED", error: err.message || "Failed to dispatch email" });
       }
     }
 
-    return NextResponse.json({ report: logs });
+    // Return logs + new 24-hour cryptographic sessionToken for client caching
+    return NextResponse.json({ 
+      report: logs,
+      sessionToken: guard.sessionToken 
+    });
   } catch (error: any) {
     return NextResponse.json(
-      { error: "Authentication or SMTP error. Please check your email and app password." },
+      { error: error.message || "Internal server error occurred while processing campaign." },
       { status: 500 }
     );
   }

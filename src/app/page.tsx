@@ -1,5 +1,7 @@
 "use client";
+
 import React, { useState, useEffect } from "react";
+import { getClientMachineId } from "@/lib/fingerprint";
 
 interface ReportItem {
   email: string;
@@ -8,12 +10,16 @@ interface ReportItem {
 }
 
 const STORAGE_KEY = "gmail_rotator_campaign";
+const SESSION_TOKEN_KEY = "reachout_daily_session_token";
+const DEFAULT_BATCH_SIZE = 15;
+const MAX_ALLOWED_BATCH_SIZE = 50;
+const MIN_ALLOWED_BATCH_SIZE = 1;
 
 export default function Home() {
   const [senderName, setSenderName] = useState("Babu");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
-  const [batchSize, setBatchSize] = useState<number>(15); // डिफ़ॉल्ट 15
+  const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
   const [subject, setSubject] = useState("Quick question regarding your website");
   const [template, setTemplate] = useState(
@@ -38,10 +44,10 @@ export default function Home() {
         setSenderEmail(parsed.senderEmail || "");
         setSubject(parsed.subject || "Quick question regarding your website");
         setTemplate(parsed.template || "");
-        setBatchSize(parsed.batchSize || 15);
+        setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
         setIsCampaignStarted(parsed.isCampaignStarted || false);
       } catch (e) {
-        console.error("Local state parse error", e);
+        console.error("Local state parse error:", e);
       }
     }
   }, []);
@@ -73,6 +79,25 @@ export default function Home() {
     );
   };
 
+  const handleBatchSizeChange = (val: string) => {
+    if (val === "") {
+      setBatchSize(0);
+      return;
+    }
+    const num = parseInt(val, 10);
+    if (!isNaN(num)) {
+      setBatchSize(Math.min(num, MAX_ALLOWED_BATCH_SIZE));
+    }
+  };
+
+  const handleBatchSizeBlur = () => {
+    if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) {
+      setBatchSize(DEFAULT_BATCH_SIZE);
+    } else if (batchSize > MAX_ALLOWED_BATCH_SIZE) {
+      setBatchSize(MAX_ALLOWED_BATCH_SIZE);
+    }
+  };
+
   const extractCleanEmails = (text: string): string[] => {
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     const matches = text.match(emailRegex) || [];
@@ -85,7 +110,7 @@ export default function Home() {
 
     const emails = extractCleanEmails(rawSheetData);
     if (emails.length === 0) {
-      alert("कृपया वैध ईमेल आईडी पेस्ट करें!");
+      alert("Please paste valid email addresses!");
       return;
     }
 
@@ -94,14 +119,15 @@ export default function Home() {
     const cleanPass = appPassword.replace(/\s+/g, "");
     const cleanSub = subject.trim();
     const cleanTmpl = template.trim();
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
 
     setAllEmails(emails);
     setCurrentIndex(0);
     setReport([]);
     setIsCampaignStarted(true);
 
-    saveState(emails, 0, [], cleanName, cleanEmail, cleanSub, cleanTmpl, batchSize, true);
-    await executeBatch(emails, 0, batchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl);
+    saveState(emails, 0, [], cleanName, cleanEmail, cleanSub, cleanTmpl, safeBatchSize, true);
+    await executeBatch(emails, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl);
   };
 
   const executeBatch = async (
@@ -116,18 +142,21 @@ export default function Home() {
   ) => {
     const batchToSend = emailList.slice(startIdx, startIdx + size);
     if (batchToSend.length === 0) {
-      alert("🎉 सभी ईमेल्स पूरे हो चुके हैं!");
+      alert("🎉 All leads have been processed successfully!");
       return;
     }
 
     if (!activeEmail || !activePass) {
-      alert("कृपया इस लॉट के लिए Gmail ID और App Password भरें!");
+      alert("Please fill in the Sender Email and App Password for this batch!");
       return;
     }
 
     setLoading(true);
 
     try {
+      const machineId = getClientMachineId();
+      const storedToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
       const res = await fetch("/api/send-campaign", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -138,11 +167,17 @@ export default function Home() {
           recipients: batchToSend,
           subject: activeSub.trim(),
           template: activeTmpl.trim(),
+          machineId,
+          sessionToken: storedToken,
         }),
       });
 
       const data = await res.json();
       if (res.ok) {
+        if (data.sessionToken) {
+          localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+        }
+
         const updatedReport = [...report, ...data.report];
         const nextIdx = startIdx + batchToSend.length;
 
@@ -152,13 +187,13 @@ export default function Home() {
         saveState(emailList, nextIdx, updatedReport, activeName, activeEmail, activeSub, activeTmpl, size, true);
 
         if (nextIdx < emailList.length) {
-          alert(`✅ लॉट पूरा हुआ (${startIdx + 1} से ${nextIdx})!\nअब आप अगली Gmail ID और App Password बदलकर अगला लॉट भेज सकते हैं।`);
+          alert(`✅ Batch completed (${startIdx + 1} to ${nextIdx})!\nYou can now change the Sender Account and App Password for the next batch.`);
         }
       } else {
-        alert(data.error || "डिलीवरी में त्रुटि आई!");
+        alert(data.error || "Delivery error occurred during execution!");
       }
     } catch (err) {
-      alert("सर्वर से संपर्क नहीं हो पाया!");
+      alert("Failed to connect to the server. Please check your connection!");
     } finally {
       setLoading(false);
     }
@@ -167,10 +202,12 @@ export default function Home() {
   const handleNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
+
     executeBatch(
       allEmails,
       currentIndex,
-      batchSize,
+      safeBatchSize,
       senderName.trim(),
       senderEmail.trim().toLowerCase(),
       appPassword.replace(/\s+/g, ""),
@@ -181,7 +218,7 @@ export default function Home() {
 
   const handleFullReset = () => {
     if (loading) return;
-    if (confirm("क्या आप वाकई पूरा कैंपेन रीसेट करना चाहते हैं?")) {
+    if (confirm("Are you sure you want to reset the entire campaign? All progress will be cleared.")) {
       localStorage.removeItem(STORAGE_KEY);
       setIsCampaignStarted(false);
       setAllEmails([]);
@@ -189,13 +226,14 @@ export default function Home() {
       setReport([]);
       setRawSheetData("");
       setAppPassword("");
+      setBatchSize(DEFAULT_BATCH_SIZE);
     }
   };
 
   const totalLeads = allEmails.length;
   const successCount = report.filter((r) => r.status === "SUCCESS").length;
   const remainingCount = Math.max(0, totalLeads - currentIndex);
-  const currentBatchTarget = Math.min(batchSize, remainingCount);
+  const currentBatchTarget = Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 py-10 px-4">
@@ -208,7 +246,7 @@ export default function Home() {
               ReachOut Multi-Account Rotator
             </h1>
             <p className="text-slate-400 text-xs mt-0.5">
-              हर लॉट पर नई Gmail ID और App Password बदलें | 100% Zero-Brevo/Direct SMTP
+              Rotate Gmail accounts per batch | 100% Direct SMTP Inboxing
             </p>
           </div>
           <button
@@ -221,7 +259,7 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Realtime Stats */}
+        {/* Realtime Statistics */}
         <div className="grid grid-cols-4 gap-3">
           <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
             <p className="text-[10px] text-slate-400 uppercase font-semibold">Total Leads</p>
@@ -241,16 +279,16 @@ export default function Home() {
           </div>
         </div>
 
-        {/* STEP 1: INITIAL SETUP */}
+        {/* STEP 1: INITIAL CAMPAIGN SETUP */}
         {!isCampaignStarted ? (
           <form onSubmit={handleStartCampaign} className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-5 shadow-xl">
             <div className="border-b border-slate-800 pb-2">
               <h2 className="text-sm font-semibold text-blue-400 uppercase tracking-wider">
-                Step 1: Setup Campaign & Lot 1
+                Step 1: Setup Campaign & Batch 1
               </h2>
             </div>
 
-            {/* ROW 1: SENDER EMAIL & APP PASSWORD (2 Columns) */}
+            {/* ROW 1: SENDER EMAIL & APP PASSWORD */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Gmail ID (Auto-trimmed)</label>
@@ -280,7 +318,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* ROW 2: SENDER NAME & LOT SIZE (2 Columns) */}
+            {/* ROW 2: SENDER NAME & BATCH SIZE */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Name (Display Name)</label>
@@ -291,21 +329,25 @@ export default function Home() {
                   value={senderName}
                   onChange={(e) => setSenderName(e.target.value)}
                   onBlur={(e) => setSenderName(e.target.value.trim())}
-                  placeholder="e.g. Babu"
+                  placeholder="e.g. Rahul Sharma"
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none"
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Lot Size (Default 15)</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
+                </label>
                 <input
                   type="number"
-                  min="1"
-                  max="50"
+                  min={MIN_ALLOWED_BATCH_SIZE}
+                  max={MAX_ALLOWED_BATCH_SIZE}
                   required
                   disabled={loading}
-                  value={batchSize}
-                  onChange={(e) => setBatchSize(Number(e.target.value))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none"
+                  value={batchSize || ""}
+                  onChange={(e) => handleBatchSizeChange(e.target.value)}
+                  onBlur={handleBatchSizeBlur}
+                  placeholder={String(DEFAULT_BATCH_SIZE)}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                 />
               </div>
             </div>
@@ -324,10 +366,10 @@ export default function Home() {
               />
             </div>
 
-            {/* ROW 4: TARGET LEADS & TEMPLATE BODY (2 Columns) */}
+            {/* ROW 4: TARGET LEADS & TEMPLATE BODY */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Target Leads (Full Sheet List)</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Target Leads (Paste Sheet List)</label>
                 <textarea
                   rows={6}
                   required
@@ -339,7 +381,7 @@ export default function Home() {
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Message Core</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body</label>
                 <textarea
                   rows={6}
                   required
@@ -357,11 +399,11 @@ export default function Home() {
               disabled={loading}
               className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50"
             >
-              {loading ? "Sending Lot 1..." : `🚀 Start Campaign & Send First ${batchSize} Leads`}
+              {loading ? "Dispatching Batch 1..." : `🚀 Start Campaign & Send First ${batchSize || DEFAULT_BATCH_SIZE} Leads`}
             </button>
           </form>
         ) : (
-          /* STEP 2: LOT ROTATION DASHBOARD */
+          /* STEP 2: BATCH ROTATION DASHBOARD */
           <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-4 shadow-xl">
             {remainingCount > 0 ? (
               <form onSubmit={handleNextBatch} className="space-y-4 bg-slate-950/70 border border-slate-800 p-5 rounded-xl">
@@ -372,10 +414,10 @@ export default function Home() {
                   <span className="text-xs text-amber-400 font-mono">Remaining: {remainingCount}</span>
                 </div>
 
-                {/* ROW 1: SENDER EMAIL & APP PASSWORD FOR THIS LOT (2 Columns) */}
+                {/* SENDER EMAIL & APP PASSWORD FOR NEXT BATCH */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">New Sender Gmail ID (Change Here)</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">New Sender Gmail ID (Change Account)</label>
                     <input
                       type="email"
                       required
@@ -388,7 +430,7 @@ export default function Home() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">New App Password (Change Here)</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">New App Password (Change Account)</label>
                     <input
                       type="password"
                       required
@@ -402,7 +444,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* ROW 2: SENDER NAME & LOT SIZE (2 Columns) */}
+                {/* SENDER NAME & BATCH SIZE */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Name (Editable)</label>
@@ -417,21 +459,25 @@ export default function Home() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Lot Size</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">
+                      Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
+                    </label>
                     <input
                       type="number"
-                      min="1"
-                      max="50"
+                      min={MIN_ALLOWED_BATCH_SIZE}
+                      max={MAX_ALLOWED_BATCH_SIZE}
                       required
                       disabled={loading}
-                      value={batchSize}
-                      onChange={(e) => setBatchSize(Number(e.target.value))}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none"
+                      value={batchSize || ""}
+                      onChange={(e) => handleBatchSizeChange(e.target.value)}
+                      onBlur={handleBatchSizeBlur}
+                      placeholder={String(DEFAULT_BATCH_SIZE)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
                   </div>
                 </div>
 
-                {/* ROW 3: SUBJECT LINE */}
+                {/* SUBJECT LINE */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line (Editable)</label>
                   <input
@@ -445,9 +491,9 @@ export default function Home() {
                   />
                 </div>
 
-                {/* ROW 4: MESSAGE CORE */}
+                {/* MESSAGE BODY */}
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Message Core (Editable)</label>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body (Editable)</label>
                   <textarea
                     rows={4}
                     required
@@ -464,7 +510,7 @@ export default function Home() {
                   disabled={loading}
                   className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50"
                 >
-                  {loading ? "Sending next batch..." : `▶ Dispatch Next Lot (${currentBatchTarget} Leads)`}
+                  {loading ? "Dispatching next batch..." : `▶ Dispatch Next Batch (${currentBatchTarget} Leads)`}
                 </button>
               </form>
             ) : (
