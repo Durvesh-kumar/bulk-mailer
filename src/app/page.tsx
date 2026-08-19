@@ -14,18 +14,17 @@ const SESSION_TOKEN_KEY = "reachout_daily_session_token";
 const DEFAULT_BATCH_SIZE = 15;
 const MAX_ALLOWED_BATCH_SIZE = 50;
 const MIN_ALLOWED_BATCH_SIZE = 1;
-const CHUNK_SIZE = 6; // 👈 6 ईमेल्स प्रति API कॉल (100% Vercel & Spam Safe)
+const CHUNK_SIZE = 6;
 
 export default function Home() {
-  const [senderName, setSenderName] = useState("Babu");
+  const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
-  const [subject, setSubject] = useState("Quick question regarding your website");
-  const [template, setTemplate] = useState(
-    "I help businesses elevate their online presence with clean, fast, and modern responsive websites.\n\nWould you be open to a quick redesign preview for your site to see what it could look like?"
-  );
+  const [subject, setSubject] = useState("");
+  const [template, setTemplate] = useState("");
+  const [customSignoffName, setCustomSignoffName] = useState("");
 
   const [allEmails, setAllEmails] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
@@ -42,10 +41,11 @@ export default function Home() {
         setAllEmails(parsed.allEmails || []);
         setCurrentIndex(parsed.currentIndex || 0);
         setReport(parsed.report || []);
-        setSenderName(parsed.senderName || "Babu");
+        setSenderName(parsed.senderName || "");
         setSenderEmail(parsed.senderEmail || "");
-        setSubject(parsed.subject || "Quick question regarding your website");
+        setSubject(parsed.subject || "website design");
         setTemplate(parsed.template || "");
+        setCustomSignoffName(parsed.customSignoffName ?? "");
         setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
         setIsCampaignStarted(parsed.isCampaignStarted || false);
       } catch (e) {
@@ -62,6 +62,7 @@ export default function Home() {
     fromEmail: string,
     sub: string,
     tmpl: string,
+    signName: string,
     bSize: number,
     active: boolean
   ) => {
@@ -75,6 +76,7 @@ export default function Home() {
         senderEmail: fromEmail.trim().toLowerCase(),
         subject: sub.trim(),
         template: tmpl.trim(),
+        customSignoffName: signName.trim(),
         batchSize: bSize,
         isCampaignStarted: active,
       })
@@ -121,6 +123,7 @@ export default function Home() {
     const cleanPass = appPassword.replace(/\s+/g, "");
     const cleanSub = subject.trim();
     const cleanTmpl = template.trim();
+    const cleanSignName = customSignoffName.trim();
     const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
 
     setAllEmails(emails);
@@ -128,8 +131,8 @@ export default function Home() {
     setReport([]);
     setIsCampaignStarted(true);
 
-    saveState(emails, 0, [], cleanName, cleanEmail, cleanSub, cleanTmpl, safeBatchSize, true);
-    await executeBatch(emails, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl);
+    saveState(emails, 0, [], cleanName, cleanEmail, cleanSub, cleanTmpl, cleanSignName, safeBatchSize, true);
+    await executeBatch(emails, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl, cleanSignName);
   };
 
   const executeBatch = async (
@@ -140,7 +143,8 @@ export default function Home() {
     activeEmail: string,
     activePass: string,
     activeSub: string,
-    activeTmpl: string
+    activeTmpl: string,
+    activeSignName: string
   ) => {
     const batchToSend = emailList.slice(startIdx, startIdx + size);
     if (batchToSend.length === 0) {
@@ -161,7 +165,6 @@ export default function Home() {
     try {
       const machineId = getClientMachineId();
 
-      // 🚀 6-6 के चंक्स में सीक्वेंशियल लूप
       for (let i = 0; i < batchToSend.length; i += CHUNK_SIZE) {
         const chunk = batchToSend.slice(i, i + CHUNK_SIZE);
         const startNum = i + 1;
@@ -179,6 +182,7 @@ export default function Home() {
             recipients: chunk,
             subject: activeSub.trim(),
             template: activeTmpl.trim(),
+            customSignoffName: activeSignName.trim(),
             machineId,
             sessionToken: latestSessionToken,
           }),
@@ -196,7 +200,6 @@ export default function Home() {
           localStorage.setItem(SESSION_TOKEN_KEY, latestSessionToken);
         }
 
-        // रिपोर्ट अपडेट करें
         const chunkResults: ReportItem[] = data.report || [];
         currentReportState = [...currentReportState, ...chunkResults];
         processedInThisBatch += chunk.length;
@@ -211,6 +214,7 @@ export default function Home() {
           activeEmail,
           activeSub,
           activeTmpl,
+          activeSignName,
           size,
           true
         );
@@ -243,7 +247,8 @@ export default function Home() {
       senderEmail.trim().toLowerCase(),
       appPassword.replace(/\s+/g, ""),
       subject.trim(),
-      template.trim()
+      template.trim(),
+      customSignoffName.trim()
     );
   };
 
@@ -257,6 +262,7 @@ export default function Home() {
       setReport([]);
       setRawSheetData("");
       setAppPassword("");
+      setCustomSignoffName("Ruby");
       setBatchSize(DEFAULT_BATCH_SIZE);
       setProgressStatus("");
     }
@@ -278,7 +284,7 @@ export default function Home() {
               ReachOut Multi-Account Rotator
             </h1>
             <p className="text-slate-400 text-xs mt-0.5">
-              Rotate Gmail accounts per batch | 4.5s - 5.0s Anti-Spam Human Pacing
+              Direct SMTP Inboxing | Dynamic Human Pacing & Name Customizer
             </p>
           </div>
           <button
@@ -311,7 +317,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Live Progress Bar Notification */}
+        {/* Progress Notification */}
         {loading && (
           <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl flex items-center gap-3">
             <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
@@ -328,7 +334,6 @@ export default function Home() {
               </h2>
             </div>
 
-            {/* ROW 1: SENDER EMAIL & APP PASSWORD */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Gmail ID (Auto-trimmed)</label>
@@ -358,10 +363,9 @@ export default function Home() {
               </div>
             </div>
 
-            {/* ROW 2: SENDER NAME & BATCH SIZE */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Name (Display Name)</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (From Display)</label>
                 <input
                   type="text"
                   required
@@ -369,7 +373,7 @@ export default function Home() {
                   value={senderName}
                   onChange={(e) => setSenderName(e.target.value)}
                   onBlur={(e) => setSenderName(e.target.value.trim())}
-                  placeholder="e.g. Rahul Sharma"
+                  placeholder="e.g. Ruby"
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none"
                 />
               </div>
@@ -387,12 +391,11 @@ export default function Home() {
                   onChange={(e) => handleBatchSizeChange(e.target.value)}
                   onBlur={handleBatchSizeBlur}
                   placeholder={String(DEFAULT_BATCH_SIZE)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none"
                 />
               </div>
             </div>
 
-            {/* ROW 3: SUBJECT LINE */}
             <div>
               <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line</label>
               <input
@@ -406,12 +409,11 @@ export default function Home() {
               />
             </div>
 
-            {/* ROW 4: TARGET LEADS & TEMPLATE BODY */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Target Leads (Paste Sheet List)</label>
                 <textarea
-                  rows={6}
+                  rows={5}
                   required
                   disabled={loading}
                   value={rawSheetData}
@@ -423,15 +425,34 @@ export default function Home() {
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body</label>
                 <textarea
-                  rows={6}
+                  rows={5}
                   required
                   disabled={loading}
                   value={template}
                   onChange={(e) => setTemplate(e.target.value)}
-                  onBlur={(e) => setTemplate(e.target.value.trim())}
+                  placeholder="Type your core pitch here..."
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:border-blue-500 outline-none"
                 />
               </div>
+            </div>
+
+            {/* Custom Sign-off Name Input (Best regards will auto-randomize, you control the name below) */}
+            <div>
+              <label className="block text-xs font-semibold text-emerald-400 mb-1">
+                Sign-off Bottom Name (e.g. Ruby, Neelam, Babu)
+              </label>
+              <input
+                type="text"
+                disabled={loading}
+                value={customSignoffName}
+                onChange={(e) => setCustomSignoffName(e.target.value)}
+                onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
+                placeholder="e.g. Ruby"
+                className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-semibold"
+              />
+              <p className="text-[11px] text-slate-400 mt-1">
+                💡 "Best regards,", "Thanks & regards,", etc. will auto-rotate with a clean 1-line space before this name.
+              </p>
             </div>
 
             <button
@@ -461,7 +482,6 @@ export default function Home() {
                   <span className="text-xs text-amber-400 font-mono">Remaining: {remainingCount}</span>
                 </div>
 
-                {/* SENDER EMAIL & APP PASSWORD FOR NEXT BATCH */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1">New Sender Gmail ID (Change Account)</label>
@@ -491,10 +511,9 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* SENDER NAME & BATCH SIZE */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Name (Editable)</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (Editable)</label>
                     <input
                       type="text"
                       required
@@ -506,9 +525,7 @@ export default function Home() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">
-                      Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
-                    </label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Batch Size</label>
                     <input
                       type="number"
                       min={MIN_ALLOWED_BATCH_SIZE}
@@ -518,13 +535,11 @@ export default function Home() {
                       value={batchSize || ""}
                       onChange={(e) => handleBatchSizeChange(e.target.value)}
                       onBlur={handleBatchSizeBlur}
-                      placeholder={String(DEFAULT_BATCH_SIZE)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none"
                     />
                   </div>
                 </div>
 
-                {/* SUBJECT LINE */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line (Editable)</label>
                   <input
@@ -538,17 +553,27 @@ export default function Home() {
                   />
                 </div>
 
-                {/* MESSAGE BODY */}
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body (Editable)</label>
                   <textarea
-                    rows={4}
+                    rows={3}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
-                    onBlur={(e) => setTemplate(e.target.value.trim())}
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-sm text-slate-100 outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-emerald-400 mb-1">Sign-off Bottom Name (Editable)</label>
+                  <input
+                    type="text"
+                    disabled={loading}
+                    value={customSignoffName}
+                    onChange={(e) => setCustomSignoffName(e.target.value)}
+                    onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
+                    className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none font-semibold"
                   />
                 </div>
 
@@ -575,7 +600,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* Live Delivery Audit Log */}
+        {/* Live Audit Log */}
         {report.length > 0 && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
             <h2 className="text-sm font-bold text-slate-300 mb-3 uppercase tracking-wider">

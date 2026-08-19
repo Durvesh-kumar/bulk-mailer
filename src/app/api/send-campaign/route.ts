@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 
-// 🔒 1.5s से 2.5s का नेचुरल डिले
+// 🔒 1.5s से 2.5s का नेचुरल रैंडम डिले
 const sleepRandom = (min = 1500, max = 2500): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -12,6 +12,7 @@ const pickRandom = (arr: string[]): string => {
   return arr[Math.floor(Math.random() * arr.length)];
 };
 
+// Spintax वेरिएशन्स
 const GREETINGS = ["Hi,", "Hello,", "Hey,", "Hi there,"];
 const OPENERS = [
   "Hope you are having a productive week.",
@@ -19,7 +20,7 @@ const OPENERS = [
   "Hope everything is going well on your end.",
   "Reaching out to quickly connect.",
 ];
-const SIGN_OFFS = ["Best regards,", "Thanks & regards,", "Warm regards,", "Best,"];
+const SIGN_OFFS = ["Best regards,", "Thanks & regards,", "Warm regards,", "Best,", "Thanks,"];
 
 export const maxDuration = 60;
 
@@ -33,13 +34,15 @@ export async function POST(req: Request) {
       recipients, 
       subject, 
       template, 
+      customSignoffName,
       machineId,
       sessionToken 
     } = body;
 
+    // 1. इनपुट वैलिडेशन
     if (!senderEmail || !appPassword || !recipients?.length || !subject || !template) {
       return NextResponse.json(
-        { error: "Please fill in all fields (Sender Email, App Password, Leads, Subject, Body)." },
+        { error: "Please fill in all required fields (Sender Email, App Password, Leads, Subject, Body)." },
         { status: 400 }
       );
     }
@@ -47,6 +50,7 @@ export async function POST(req: Request) {
     const hostHeader =
       req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost";
 
+    // 2. लाइसेंस, डिवाइस और सेशन वेरिफिकेशन
     const guard = await verifyLicenseAndDevice(hostHeader, machineId, sessionToken);
     if (!guard.ok) {
       return NextResponse.json(
@@ -60,9 +64,14 @@ export async function POST(req: Request) {
 
     const cleanSender = senderEmail.trim().toLowerCase();
     const cleanPassword = appPassword.replace(/\s+/g, "");
-    const cleanName = (senderName || "Babu").trim();
+    const cleanHeaderName = (senderName || "Ruby").trim();
 
-    // 1. Google Hostname Masking Transport
+    // नीचे का नाम (अगर कस्टम नाम दिया है तो वो, नहीं तो हेडर नाम)
+    const finalSignoffName = (customSignoffName && customSignoffName.trim().length > 0)
+      ? customSignoffName.trim()
+      : cleanHeaderName;
+
+    // 3. ऑथेंटिक Gmail SMTP सेटअप
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
@@ -78,13 +87,14 @@ export async function POST(req: Request) {
       await transporter.verify();
     } catch (authErr: any) {
       return NextResponse.json(
-        { error: "Authentication or SMTP error. Please check your email and app password." },
+        { error: "Authentication failed. Check your Gmail ID or 16-digit App Password." },
         { status: 401 }
       );
     }
 
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
 
+    // 4. ईमेल डिस्पैच लूप
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
 
@@ -96,37 +106,16 @@ export async function POST(req: Request) {
         .replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "")
         .replace(/^(hope this note finds you well|hope you are having a productive week|reaching out to quickly connect)[^\n]*\n+/i, "");
 
-      const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n${cleanName}`;
-
-      const htmlContent = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"></head>
-<body style="font-family: Arial, Helvetica, sans-serif; font-size: 14.5px; line-height: 1.6; color: #111; margin: 0; padding: 0;">
-  <p style="margin: 0 0 12px 0;">${randomGreeting}</p>
-  <p style="margin: 0 0 12px 0;">${randomOpener}</p>
-  <p style="margin: 0 0 12px 0;">${cleanUserBody.replace(/\n\n/g, "</p><p style='margin: 0 0 12px 0;'>").replace(/\n/g, "<br/>")}</p>
-  <p style="margin: 16px 0 0 0;">${randomSignOff}<br/>${cleanName}</p>
-</body>
-</html>
-      `.trim();
-
-      // 2. Exact Genuine Google Message-ID
-      const randomHex = Math.random().toString(36).substring(2, 15);
-      const customMessageId = `<${Date.now()}.${randomHex}@mail.gmail.com>`;
+      // 💡 1 स्पेस (लाइन ब्रेक) के साथ साफ़ फॉर्मेट
+      const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n\n${finalSignoffName}`;
 
       try {
+        // ✅ Gmail खुद DKIM और 100% असली Message-ID साइन करेगा
         await transporter.sendMail({
-          from: `"${cleanName}" <${cleanSender}>`,
+          from: `"${cleanHeaderName}" <${cleanSender}>`,
           to: recipientEmail,
           subject: subject.trim(),
           text: plainText,
-          html: htmlContent,
-          messageId: customMessageId,
-          headers: {
-            "MIME-Version": "1.0",
-            "Content-Type": "text/html; charset=UTF-8",
-          },
         });
 
         logs.push({ email: recipientEmail, status: "SUCCESS" });
@@ -145,7 +134,7 @@ export async function POST(req: Request) {
     });
   } catch (error: any) {
     return NextResponse.json(
-      { error: "Authentication or SMTP error. Please check your email and app password." },
+      { error: error.message || "Internal server error." },
       { status: 500 }
     );
   }
