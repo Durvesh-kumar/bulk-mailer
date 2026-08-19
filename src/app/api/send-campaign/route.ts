@@ -30,7 +30,10 @@ export async function POST(req: Request) {
 
     // Validate fields
     if (!senderEmail || !appPassword || !recipients?.length || !subject || !template) {
-      return NextResponse.json({ error: "Please fill in all fields (Sender Email, App Password, Leads, Subject, Body)." }, { status: 400 });
+      return NextResponse.json(
+        { error: "Please fill in all fields (Sender Email, App Password, Leads, Subject, Body)." },
+        { status: 400 }
+      );
     }
 
     const cleanSender = senderEmail.trim().toLowerCase();
@@ -46,7 +49,7 @@ export async function POST(req: Request) {
         user: cleanSender,
         pass: cleanPassword,
       },
-      name: "mail.google.com", // Masking the cloud server name
+      name: "mail.google.com",
     });
 
     await transporter.verify();
@@ -77,7 +80,6 @@ export async function POST(req: Request) {
 </html>
       `.trim();
 
-      // Anti-spam: Generate genuine Google Message-ID
       const randomHex = Math.random().toString(36).substring(2, 15);
       const customMessageId = `<${Date.now()}.${randomHex}@mail.gmail.com>`;
 
@@ -89,15 +91,10 @@ export async function POST(req: Request) {
           text: plainText,
           html: htmlContent,
           messageId: customMessageId,
-          headers: {
-            "MIME-Version": "1.0",
-            "Content-Type": "text/html; charset=UTF-8",
-          },
         });
 
         logs.push({ email: recipientEmail, status: "SUCCESS" });
 
-        // Delay to avoid triggering Vercel timeout and spam filters
         if (i < recipients.length - 1) {
           await sleepRandom(1500, 2500);
         }
