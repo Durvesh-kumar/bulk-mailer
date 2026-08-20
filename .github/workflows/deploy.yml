@@ -45,7 +45,7 @@ jobs:
           vercel --prod \
             --token=${{ secrets.PERSONAL_VERCEL_TOKEN }} \
             --scope=${{ secrets.PERSONAL_VERCEL_ORG_ID }} \
-            --name=inboxflow-personal \
+            --name=inboxflow \
             --yes
 
   # 2. Deploy to Manish Vercel
