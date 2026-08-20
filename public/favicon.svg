@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- प्रीमियम इलेक्ट्रिक ब्लू राउंडेड बैकग्राउंड -->
+  <rect width="64" height="64" rx="16" fill="#2563EB" />
+  
+  <!-- सूक्ष्म डार्क ग्रेडिएंट शेड (3D SaaS लुक के लिए) -->
+  <rect width="64" height="64" rx="16" fill="url(#blue_grad)" fill-opacity="0.25" />
+  
+  <!-- मॉडर्न सुपरफास्ट पेपर-प्लेन / आउटरीच सिंबल -->
+  <path d="M47.2 16.8a1.5 1.5 0 0 0-1.6-.35L16.4 28.1a1.5 1.5 0 0 0-.05 2.8l10.8 4.2 4.2 10.8a1.5 1.5 0 0 0 2.8-.05l11.65-29.2a1.5 1.5 0 0 0-.35-1.6l-18.3 18.3" 
+        stroke="#FFFFFF" 
+        stroke-width="4.5" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" />
+        
+  <defs>
+    <linearGradient id="blue_grad" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.3"/>
+    </linearGradient>
+  </defs>
+</svg>
