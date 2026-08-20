@@ -3,7 +3,7 @@ import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 
 // 🔒 1.5s से 2.5s का नेचुरल रैंडम डिले
-const sleepRandom = (min = 1500, max = 2500): Promise<void> => {
+const sleepRandom = (min = 3500, max = 4000): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
 };

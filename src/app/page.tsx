@@ -291,7 +291,7 @@ export default function Home() {
             type="button"
             disabled={loading}
             onClick={handleFullReset}
-            className="px-4 py-2 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-500/30 rounded-xl text-xs font-semibold transition disabled:opacity-40"
+            className="px-4 py-2 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-500/30 rounded-xl text-xs font-semibold transition disabled:opacity-40 cursor-pointer"
           >
             🔄 Reset Campaign
           </button>
@@ -334,6 +334,7 @@ export default function Home() {
               </h2>
             </div>
 
+            {/* Row 1: Gmail Account Credentials */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Gmail ID (Auto-trimmed)</label>
@@ -345,7 +346,7 @@ export default function Home() {
                   onChange={(e) => setSenderEmail(e.target.value)}
                   onBlur={(e) => setSenderEmail(e.target.value.trim().toLowerCase())}
                   placeholder="account1@gmail.com"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none overflow-hidden"
                 />
               </div>
               <div>
@@ -358,45 +359,65 @@ export default function Home() {
                   onChange={(e) => setAppPassword(e.target.value)}
                   onBlur={(e) => setAppPassword(e.target.value.replace(/\s+/g, ""))}
                   placeholder="xxxx xxxx xxxx xxxx"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-amber-300 font-mono focus:border-blue-500 outline-none"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-amber-300 font-mono focus:border-blue-500 outline-none overflow-hidden"
                 />
               </div>
             </div>
 
+            {/* Row 2: Target Leads (Left) + Sender Name & Batch Size (Right Side) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Left Column: Target Leads */}
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (From Display)</label>
-                <input
-                  type="text"
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Target Leads (Paste Sheet List)</label>
+                <textarea
+                  rows={7}
                   required
                   disabled={loading}
-                  value={senderName}
-                  onChange={(e) => setSenderName(e.target.value)}
-                  onBlur={(e) => setSenderName(e.target.value.trim())}
-                  placeholder="e.g. Ruby"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none"
+                  value={rawSheetData}
+                  onChange={(e) => setRawSheetData(e.target.value)}
+                  placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-blue-500 outline-none resize-none"
                 />
               </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
-                </label>
-                <input
-                  type="number"
-                  min={MIN_ALLOWED_BATCH_SIZE}
-                  max={MAX_ALLOWED_BATCH_SIZE}
-                  required
-                  disabled={loading}
-                  value={batchSize || ""}
-                  onChange={(e) => handleBatchSizeChange(e.target.value)}
-                  onBlur={handleBatchSizeBlur}
-                  placeholder={String(DEFAULT_BATCH_SIZE)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none"
-                />
+
+              {/* Right Column: Stacked Controls (Sender Header Name & Batch Size) */}
+              <div className="space-y-3 flex flex-col justify-center">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (From Display)</label>
+                  <input
+                    type="text"
+                    required
+                    disabled={loading}
+                    value={senderName}
+                    onChange={(e) => setSenderName(e.target.value)}
+                    onBlur={(e) => setSenderName(e.target.value.trim())}
+                    placeholder="e.g. Ruby"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none overflow-hidden"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
+                  </label>
+                  <input
+                    type="number"
+                    min={MIN_ALLOWED_BATCH_SIZE}
+                    max={MAX_ALLOWED_BATCH_SIZE}
+                    required
+                    disabled={loading}
+                    value={batchSize || ""}
+                    onChange={(e) => handleBatchSizeChange(e.target.value)}
+                    onBlur={handleBatchSizeBlur}
+                    placeholder={String(DEFAULT_BATCH_SIZE)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none overflow-hidden [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                </div>
               </div>
             </div>
 
-            <div>
+            {/* Row 3: Subject Line (Full Width Single Row) */}
+            <div className="w-full">
               <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line</label>
               <input
                 type="text"
@@ -405,39 +426,27 @@ export default function Home() {
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 onBlur={(e) => setSubject(e.target.value.trim())}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none"
+                placeholder="e.g. website design"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none overflow-hidden"
               />
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Target Leads (Paste Sheet List)</label>
-                <textarea
-                  rows={5}
-                  required
-                  disabled={loading}
-                  value={rawSheetData}
-                  onChange={(e) => setRawSheetData(e.target.value)}
-                  placeholder="lead1@example.com&#10;lead2@example.com"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-blue-500 outline-none"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body</label>
-                <textarea
-                  rows={5}
-                  required
-                  disabled={loading}
-                  value={template}
-                  onChange={(e) => setTemplate(e.target.value)}
-                  placeholder="Type your core pitch here..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-sm text-slate-100 focus:border-blue-500 outline-none"
-                />
-              </div>
+            {/* Row 4: Message Body (Full Width Single Row) */}
+            <div className="w-full">
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body</label>
+              <textarea
+                rows={6}
+                required
+                disabled={loading}
+                value={template}
+                onChange={(e) => setTemplate(e.target.value)}
+                placeholder="Type your core pitch here..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-sm text-slate-100 focus:border-blue-500 outline-none leading-relaxed resize-none"
+              />
             </div>
 
-            {/* Custom Sign-off Name Input (Best regards will auto-randomize, you control the name below) */}
-            <div>
+            {/* Row 5: Sign-off Bottom Name (Full Width Single Row) */}
+            <div className="w-full">
               <label className="block text-xs font-semibold text-emerald-400 mb-1">
                 Sign-off Bottom Name (e.g. Ruby, Neelam, Babu)
               </label>
@@ -448,7 +457,7 @@ export default function Home() {
                 onChange={(e) => setCustomSignoffName(e.target.value)}
                 onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
                 placeholder="e.g. Ruby"
-                className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-semibold"
+                className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-semibold overflow-hidden"
               />
               <p className="text-[11px] text-slate-400 mt-1">
                 💡 "Best regards,", "Thanks & regards,", etc. will auto-rotate with a clean 1-line space before this name.
@@ -458,7 +467,7 @@ export default function Home() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2"
+              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer"
             >
               {loading ? (
                 <>
@@ -482,6 +491,7 @@ export default function Home() {
                   <span className="text-xs text-amber-400 font-mono">Remaining: {remainingCount}</span>
                 </div>
 
+                {/* Account Switch Inputs */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1">New Sender Gmail ID (Change Account)</label>
@@ -493,7 +503,7 @@ export default function Home() {
                       onChange={(e) => setSenderEmail(e.target.value)}
                       onBlur={(e) => setSenderEmail(e.target.value.trim().toLowerCase())}
                       placeholder="account2@gmail.com"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none overflow-hidden"
                     />
                   </div>
                   <div>
@@ -506,14 +516,15 @@ export default function Home() {
                       onChange={(e) => setAppPassword(e.target.value)}
                       onBlur={(e) => setAppPassword(e.target.value.replace(/\s+/g, ""))}
                       placeholder="xxxx xxxx xxxx xxxx"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-amber-300 font-mono outline-none"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-amber-300 font-mono outline-none overflow-hidden"
                     />
                   </div>
                 </div>
 
+                {/* Batch Config Controls (2 Columns) */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (Editable)</label>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name</label>
                     <input
                       type="text"
                       required
@@ -521,7 +532,7 @@ export default function Home() {
                       value={senderName}
                       onChange={(e) => setSenderName(e.target.value)}
                       onBlur={(e) => setSenderName(e.target.value.trim())}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none overflow-hidden"
                     />
                   </div>
                   <div>
@@ -535,13 +546,14 @@ export default function Home() {
                       value={batchSize || ""}
                       onChange={(e) => handleBatchSizeChange(e.target.value)}
                       onBlur={handleBatchSizeBlur}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none overflow-hidden [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line (Editable)</label>
+                {/* Subject Line (Full Row) */}
+                <div className="w-full">
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line (Full Row)</label>
                   <input
                     type="text"
                     required
@@ -549,23 +561,25 @@ export default function Home() {
                     value={subject}
                     onChange={(e) => setSubject(e.target.value)}
                     onBlur={(e) => setSubject(e.target.value.trim())}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none overflow-hidden"
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body (Editable)</label>
+                {/* Message Body (Full Row) */}
+                <div className="w-full">
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body (Full Row)</label>
                   <textarea
-                    rows={3}
+                    rows={4}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-sm text-slate-100 outline-none"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3.5 text-sm text-slate-100 outline-none leading-relaxed resize-none"
                   />
                 </div>
 
-                <div>
+                {/* Sign-off Bottom Name (Full Row) */}
+                <div className="w-full">
                   <label className="block text-xs font-semibold text-emerald-400 mb-1">Sign-off Bottom Name (Editable)</label>
                   <input
                     type="text"
@@ -573,14 +587,14 @@ export default function Home() {
                     value={customSignoffName}
                     onChange={(e) => setCustomSignoffName(e.target.value)}
                     onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
-                    className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none font-semibold"
+                    className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none font-semibold overflow-hidden"
                   />
                 </div>
 
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2"
+                  className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer"
                 >
                   {loading ? (
                     <>
