@@ -1,0 +1,82 @@
+name: Multi-Account Vercel Auto-Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_account:
+        description: 'Which account do you want to deploy to?'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - personal
+          - manish
+
+jobs:
+  # 1. Deploy to Personal Vercel
+  deploy-personal:
+    if: ${{ github.event.inputs.target_account == 'personal' || github.event.inputs.target_account == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # 🔒 GitHub Action generates the .env.production file
+      - name: Inject Secure Environment Variables
+        run: |
+          cat <<EOF > .env.production
+          NODE_ENV=production
+          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
+          ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          EOF
+
+      - name: Build and Deploy to Personal Vercel
+        run: |
+          vercel --prod \
+            --token=${{ secrets.PERSONAL_VERCEL_TOKEN }} \
+            --scope=${{ secrets.PERSONAL_VERCEL_ORG_ID }} \
+            --name=inboxflow-personal \
+            --yes
+
+  # 2. Deploy to Manish Vercel
+  deploy-manish:
+    if: ${{ github.event.inputs.target_account == 'manish' || github.event.inputs.target_account == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # 🔒 Inject secrets for Manish from GitHub Actions
+      - name: Inject Secure Environment Variables
+        run: |
+          cat <<EOF > .env.production
+          NODE_ENV=production
+          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          EOF
+
+      - name: Build and Deploy to Manish Vercel
+        run: |
+          vercel --prod \
+            --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
+            --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
+            --name=inboxflow-manish \
+            --yes
