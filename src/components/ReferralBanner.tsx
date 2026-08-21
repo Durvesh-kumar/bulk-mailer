@@ -5,9 +5,9 @@ import React, { useState, useEffect } from "react";
 import Image from "next/image";
 
 // 📱 Admin WhatsApp Contact
-const ADMIN_WHATSAPP_NUMBER = "919876543210"; 
+const ADMIN_WHATSAPP_NUMBER = "+918266821377"; 
 // 📧 Admin Support / Referral Receiving Gmail
-const ADMIN_EMAIL = "admin@inboxflow.com";
+const ADMIN_EMAIL = "inboxsend.support@gmail.com";
 
 export default function ReferralBanner() {
   const [isOpen, setIsOpen] = useState(false);
