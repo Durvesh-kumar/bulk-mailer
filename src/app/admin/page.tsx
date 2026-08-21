@@ -1,7 +1,7 @@
 // src/app/admin/page.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 interface License {
   _id: string;
@@ -35,7 +35,6 @@ function calculateFutureExpiry(months: number): { formatted: string; daysCount: 
 }
 
 export default function AdminDashboard() {
-  // 🔒 केवल In-Memory State (लोकल स्टोरेज / सेशन स्टोरेज में 0% सेव)
   const [adminKey, setAdminKey] = useState("");
   const [isAuth, setIsAuth] = useState(false);
   const [licenses, setLicenses] = useState<License[]>([]);
@@ -50,10 +49,7 @@ export default function AdminDashboard() {
   const preview = calculateFutureExpiry(Number(validityMonths) || 1);
 
   const fetchLicenses = async (key = adminKey) => {
-    if (!key.trim()) {
-      setFeedback("Admin Secret Key is required.");
-      return;
-    }
+    if (!key.trim()) return;
     setLoading(true);
     setFeedback("");
     try {
@@ -64,17 +60,24 @@ export default function AdminDashboard() {
       if (res.ok) {
         setLicenses(data.licenses || []);
         setIsAuth(true);
+        sessionStorage.setItem("admin_key_session", key.trim());
       } else {
-        setFeedback(data.error || "Invalid Admin Key. Access Denied.");
-        setIsAuth(false);
+        setFeedback(data.error || "Invalid Admin Key");
       }
     } catch {
       setFeedback("Failed to connect to the server.");
-      setIsAuth(false);
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    const savedKey = sessionStorage.getItem("admin_key_session");
+    if (savedKey) {
+      setAdminKey(savedKey);
+      fetchLicenses(savedKey);
+    }
+  }, []);
 
   const handleCreateLicense = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -144,7 +147,7 @@ export default function AdminDashboard() {
   };
 
   const handleResetDevice = async (appDomain: string) => {
-    if (!confirm(`Reset machine lock for ${appDomain}? Next device will auto-bind.`)) return;
+    if (!confirm(`Reset machine lock for ${appDomain}? Next laptop will auto-bind.`)) return;
 
     setLoading(true);
     try {
@@ -187,14 +190,7 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleLogout = () => {
-    setAdminKey("");
-    setIsAuth(false);
-    setLicenses([]);
-    setFeedback("");
-  };
-
-  // 🔐 1. कड़ा लॉगिन गेट (बिना सही पासवर्ड के डैशबोर्ड लोड ही नहीं होगा)
+  // 🔐 लॉगिन गेट
   if (!isAuth) {
     return (
       <main className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
@@ -202,7 +198,7 @@ export default function AdminDashboard() {
           <div className="mx-auto mb-4 w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-xl">
             ⚡
           </div>
-          <h1 className="text-lg font-bold text-white mb-1 text-center">InboxSend Admin Console</h1>
+          <h1 className="text-lg font-bold text-white mb-1 text-center">InboxFlow Admin Console</h1>
           <p className="text-xs text-slate-400 mb-6 text-center">Hardware Lock & Domain Licensing</p>
 
           {feedback && (
@@ -214,7 +210,6 @@ export default function AdminDashboard() {
           <form onSubmit={(e) => { e.preventDefault(); fetchLicenses(adminKey); }} className="space-y-3">
             <input
               type="password"
-              autoComplete="off"
               placeholder="Enter Admin Secret Key"
               className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-xs text-white outline-none focus:border-indigo-500 font-mono"
               value={adminKey}
@@ -234,7 +229,6 @@ export default function AdminDashboard() {
     );
   }
 
-  // 🛡️ 2. असली ऑथेंटिकेटेड डैशबोर्ड
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 overflow-x-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -243,20 +237,23 @@ export default function AdminDashboard() {
         <div className="flex justify-between items-center bg-slate-900/80 border border-slate-800/80 p-5 rounded-2xl shadow-xl backdrop-blur-sm">
           <div>
             <h1 className="text-lg md:text-xl font-bold text-white flex items-center gap-2">
-              <span className="text-indigo-400">⚡</span> InboxSend Admin Hub
+              <span className="text-indigo-400">⚡</span> InboxFlow Admin Hub
             </h1>
-            <p className="text-[11px] text-slate-400 mt-0.5">Hardware Lock & Licensing Controller</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Month & Year Expiry Engine • Machine Lock Control</p>
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => fetchLicenses(adminKey)}
+              onClick={() => fetchLicenses()}
               className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 px-3 py-1.5 rounded-xl transition cursor-pointer"
             >
               🔄 Refresh
             </button>
             <button
               type="button"
-              onClick={handleLogout}
+              onClick={() => {
+                sessionStorage.removeItem("admin_key_session");
+                setIsAuth(false);
+              }}
               className="text-xs text-rose-400 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 px-3 py-1.5 rounded-xl transition cursor-pointer"
             >
               Logout
@@ -287,7 +284,7 @@ export default function AdminDashboard() {
               <label className="block text-[11px] font-semibold text-slate-400 mb-1">Client Name</label>
               <input
                 type="text"
-                placeholder="e.g. Acme Corp / Client Name"
+                placeholder="e.g. Rahul Sharma"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-100 outline-none focus:border-indigo-500"
                 value={newClient}
                 onChange={(e) => setNewClient(e.target.value)}
