@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { getClientMachineId } from "@/lib/fingerprint";
+import SuspendedScreen from "@/components/SuspendedScreen";
 
 interface ReportItem {
   email: string;
@@ -12,11 +13,20 @@ interface ReportItem {
 const STORAGE_KEY = "gmail_rotator_campaign";
 const SESSION_TOKEN_KEY = "reachout_daily_session_token";
 const DEFAULT_BATCH_SIZE = 15;
-const MAX_ALLOWED_BATCH_SIZE = 50;
+const MAX_ALLOWED_BATCH_SIZE = 100;
 const MIN_ALLOWED_BATCH_SIZE = 1;
-const CHUNK_SIZE = 6;
+const CHUNK_SIZE = 10;
 
 export default function Home() {
+  // 🔒 लाइसेंस, डिवाइस और एक्सपायरी स्टेट्स
+  const [loadingLicense, setLoadingLicense] = useState(true);
+  const [isSuspended, setIsSuspended] = useState(false);
+  const [userType, setUserType] = useState<"NEW_USER" | "SUSPENDED" | "EXPIRED">("NEW_USER");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [machineId, setMachineId] = useState("");
+  const [appDomain, setAppDomain] = useState("");
+
+  // फॉर्म और कैंपेन स्टेट्स
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
@@ -33,6 +43,59 @@ export default function Home() {
   const [report, setReport] = useState<ReportItem[]>([]);
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
 
+  // 1️⃣ पेज लोड होते ही डिवाइस, लाइसेंस और एक्सपायरी चेक
+  useEffect(() => {
+    async function initSecurityAndLicense() {
+      try {
+        const currentDomain = window.location.hostname;
+        setAppDomain(currentDomain);
+
+        const currentMachineId = await getClientMachineId();
+        setMachineId(currentMachineId);
+
+        const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
+        // बैकएंड लाइसेंस गार्ड वेरिफिकेशन
+        const res = await fetch("/api/check-license", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            machineId: currentMachineId,
+            domain: currentDomain,
+            sessionToken: savedSession,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || !data.allowed) {
+          setIsSuspended(true);
+          if (data.reason === "EXPIRED") {
+            setUserType("EXPIRED");
+            setExpiryDate(data.expiryDate || "Expired");
+          } else if (data.reason === "NEW_DEVICE") {
+            setUserType("NEW_USER");
+          } else {
+            setUserType("SUSPENDED");
+          }
+        } else {
+          setIsSuspended(false);
+          if (data.sessionToken) {
+            localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          }
+        }
+      } catch (err) {
+        setIsSuspended(true);
+        setUserType("NEW_USER");
+      } finally {
+        setLoadingLicense(false);
+      }
+    }
+
+    initSecurityAndLicense();
+  }, []);
+
+  // 2️⃣ लोकल स्टोरेज स्टेट लोड
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
@@ -163,7 +226,7 @@ export default function Home() {
     let processedInThisBatch = 0;
 
     try {
-      const machineId = getClientMachineId();
+      const currentMachineId = await getClientMachineId();
 
       for (let i = 0; i < batchToSend.length; i += CHUNK_SIZE) {
         const chunk = batchToSend.slice(i, i + CHUNK_SIZE);
@@ -183,12 +246,29 @@ export default function Home() {
             subject: activeSub.trim(),
             template: activeTmpl.trim(),
             customSignoffName: activeSignName.trim(),
-            machineId,
+            machineId: currentMachineId,
             sessionToken: latestSessionToken,
           }),
         });
 
         const data = await res.json();
+
+        // 🔒 अगर API ने 403 (लाइसेंस इनवैलिड, सस्पेंड या एक्सपायर) रिटर्न किया
+        if (res.status === 403) {
+          setIsSuspended(true);
+          if (data.reason === "EXPIRED") {
+            setUserType("EXPIRED");
+            setExpiryDate(data.expiryDate || "Expired");
+          } else if (data.reason === "NEW_DEVICE") {
+            setUserType("NEW_USER");
+          } else {
+            setUserType("SUSPENDED");
+          }
+          if (data.clearSession) {
+            localStorage.removeItem(SESSION_TOKEN_KEY);
+          }
+          break;
+        }
 
         if (!res.ok) {
           alert(`Execution Error: ${data.error || "Delivery halted unexpectedly"}`);
@@ -268,11 +348,36 @@ export default function Home() {
     }
   };
 
+  // ⏳ लोडिंग स्क्रीन (लाइसेंस वेरिफिकेशन के दौरान)
+  if (loadingLicense) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 text-xs font-mono gap-3">
+        <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        <span>Verifying Security Gateway & License...</span>
+      </div>
+    );
+  }
+
+  // 🚫 🎯 SUSPENDED / EXPIRED / NEW USER SCREEN (Early Return)
+  if (isSuspended) {
+    return (
+      <SuspendedScreen
+        machineId={machineId}
+        appDomain={appDomain}
+        userType={userType}
+        expiryDate={expiryDate}
+        adminPhone="+918266821377"
+        adminEmail="inboxsend.support@gmail.com"
+      />
+    );
+  }
+
   const totalLeads = allEmails.length;
   const successCount = report.filter((r) => r.status === "SUCCESS").length;
   const remainingCount = Math.max(0, totalLeads - currentIndex);
   const currentBatchTarget = Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
 
+  // ✅ अधिकृत यूज़र के लिए मुख्य डैशबोर्ड
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 py-10 px-4">
       <div className="max-w-4xl mx-auto space-y-6">
@@ -281,7 +386,7 @@ export default function Home() {
         <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-xl">
           <div>
             <h1 className="text-2xl font-bold bg-linear-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-              ReachOut Multi-Account Rotator
+              InboxSend Multi-Account Rotator
             </h1>
             <p className="text-slate-400 text-xs mt-0.5">
               Direct SMTP Inboxing | Dynamic Human Pacing & Name Customizer
@@ -380,7 +485,7 @@ export default function Home() {
                 />
               </div>
 
-              {/* Right Column: Stacked Controls (Sender Header Name & Batch Size) */}
+              {/* Right Column: Stacked Controls */}
               <div className="space-y-3 flex flex-col justify-center">
                 <div>
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (From Display)</label>
@@ -416,7 +521,7 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Row 3: Subject Line (Full Width Single Row) */}
+            {/* Row 3: Subject Line */}
             <div className="w-full">
               <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line</label>
               <input
@@ -431,7 +536,7 @@ export default function Home() {
               />
             </div>
 
-            {/* Row 4: Message Body (Full Width Single Row) */}
+            {/* Row 4: Message Body */}
             <div className="w-full">
               <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body</label>
               <textarea
@@ -445,7 +550,7 @@ export default function Home() {
               />
             </div>
 
-            {/* Row 5: Sign-off Bottom Name (Full Width Single Row) */}
+            {/* Row 5: Sign-off Bottom Name */}
             <div className="w-full">
               <label className="block text-xs font-semibold text-emerald-400 mb-1">
                 Sign-off Bottom Name (e.g. Ruby, Neelam, Babu)
@@ -521,7 +626,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Batch Config Controls (2 Columns) */}
+                {/* Batch Config Controls */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name</label>
@@ -551,7 +656,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Subject Line (Full Row) */}
+                {/* Subject Line */}
                 <div className="w-full">
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line (Full Row)</label>
                   <input
@@ -565,7 +670,7 @@ export default function Home() {
                   />
                 </div>
 
-                {/* Message Body (Full Row) */}
+                {/* Message Body */}
                 <div className="w-full">
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body (Full Row)</label>
                   <textarea
@@ -578,7 +683,7 @@ export default function Home() {
                   />
                 </div>
 
-                {/* Sign-off Bottom Name (Full Row) */}
+                {/* Sign-off Bottom Name */}
                 <div className="w-full">
                   <label className="block text-xs font-semibold text-emerald-400 mb-1">Sign-off Bottom Name (Editable)</label>
                   <input

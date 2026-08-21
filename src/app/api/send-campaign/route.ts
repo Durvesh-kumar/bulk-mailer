@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
+import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
 
-// 🔒 1.5s से 2.5s का नेचुरल रैंडम डिले
-const sleepRandom = (min = 3500, max = 4000): Promise<void> => {
+// 🔒 ऑप्टिमाइज्ड नेचुरल रैंडम डिले (1.2s से 2.2s) - हाई स्पीड + स्पैम सेफ
+const sleepRandom = (min = 1200, max = 2200): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
@@ -11,16 +12,6 @@ const sleepRandom = (min = 3500, max = 4000): Promise<void> => {
 const pickRandom = (arr: string[]): string => {
   return arr[Math.floor(Math.random() * arr.length)];
 };
-
-// Spintax वेरिएशन्स
-const GREETINGS = ["Hi,", "Hello,", "Hey,", "Hi there,"];
-const OPENERS = [
-  "Hope you are having a productive week.",
-  "Hope this note finds you well.",
-  "Hope everything is going well on your end.",
-  "Reaching out to quickly connect.",
-];
-const SIGN_OFFS = ["Best regards,", "Thanks & regards,", "Warm regards,", "Best,", "Thanks,"];
 
 export const maxDuration = 60;
 
@@ -66,12 +57,12 @@ export async function POST(req: Request) {
     const cleanPassword = appPassword.replace(/\s+/g, "");
     const cleanHeaderName = (senderName || "Ruby").trim();
 
-    // नीचे का नाम (अगर कस्टम नाम दिया है तो वो, नहीं तो हेडर नाम)
+    // नीचे का नाम (कस्टम या हेडर नाम)
     const finalSignoffName = (customSignoffName && customSignoffName.trim().length > 0)
       ? customSignoffName.trim()
       : cleanHeaderName;
 
-    // 3. ऑथेंटिक Gmail SMTP सेटअप
+    // 3. 🚀 हाई-स्पीड SMTP Connection Pool सेटअप
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
@@ -80,6 +71,9 @@ export async function POST(req: Request) {
         user: cleanSender,
         pass: cleanPassword,
       },
+      pool: true,          // सॉकेट्स को री-यूज़ करेगा (फास्ट डिलीवरी)
+      maxConnections: 5,   // 5 पैरेलल पाइप्स
+      maxMessages: 100,    // 100 मेल्स बाद सेफ री-कनेक्ट
       name: "mail.google.com",
     });
 
@@ -106,11 +100,10 @@ export async function POST(req: Request) {
         .replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "")
         .replace(/^(hope this note finds you well|hope you are having a productive week|reaching out to quickly connect)[^\n]*\n+/i, "");
 
-      // 💡 1 स्पेस (लाइन ब्रेक) के साथ साफ़ फॉर्मेट
+      // साफ़ इनलाइन फ़ॉर्मेट
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n\n${finalSignoffName}`;
 
       try {
-        // ✅ Gmail खुद DKIM और 100% असली Message-ID साइन करेगा
         await transporter.sendMail({
           from: `"${cleanHeaderName}" <${cleanSender}>`,
           to: recipientEmail,
@@ -120,13 +113,17 @@ export async function POST(req: Request) {
 
         logs.push({ email: recipientEmail, status: "SUCCESS" });
 
+        // मेल के बीच नेचुरल गैप
         if (i < recipients.length - 1) {
-          await sleepRandom(1500, 2500);
+          await sleepRandom(1200, 2200);
         }
       } catch (err: any) {
         logs.push({ email: recipientEmail, status: "FAILED", error: "Failed to send: " + err.message });
       }
     }
+
+    // पूल कनेक्शन बंद करें
+    transporter.close();
 
     return NextResponse.json({ 
       report: logs,

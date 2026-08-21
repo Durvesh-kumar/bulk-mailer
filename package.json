@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "lucide-react": "^1.33.0",
     "mongoose": "^9.9.3",
     "next": "16.3.1",
     "nodemailer": "^9.0.5",
