@@ -5,16 +5,15 @@ import React, { useState, useEffect } from "react";
 import { getClientMachineId } from "@/lib/fingerprint";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import ReferralBanner from "@/components/ReferralBanner";
+import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 
 const STORAGE_KEY = "inboxsend_queue_session";
 const SESSION_TOKEN_KEY = "reachout_daily_session_token";
-const DEFAULT_BATCH_SIZE = 15;
-const MAX_ALLOWED_BATCH_SIZE = 100;
+const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
-const CHUNK_SIZE = 10;
 
 export default function Home() {
-  // 🔒 लाइसेंस और डिवाइस स्टेट्स
+  // Security & License State
   const [loadingLicense, setLoadingLicense] = useState(true);
   const [isSuspended, setIsSuspended] = useState(false);
   const [userType, setUserType] = useState<"NEW_USER" | "SUSPENDED" | "EXPIRED">("NEW_USER");
@@ -22,7 +21,7 @@ export default function Home() {
   const [machineId, setMachineId] = useState("");
   const [appDomain, setAppDomain] = useState("");
 
-  // फॉर्म और कैंपेन स्टेट्स
+  // Campaign Form State
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
@@ -31,11 +30,12 @@ export default function Home() {
   const [subject, setSubject] = useState("");
   const [template, setTemplate] = useState("");
   const [customSignoffName, setCustomSignoffName] = useState("");
+  const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
-  // 🎯 कतार (Queue) आधारित स्टेट्स
-  const [pendingEmails, setPendingEmails] = useState<string[]>([]); // सिर्फ बची हुई ईमेल
-  const [initialTotalCount, setInitialTotalCount] = useState<number>(0); // ओरिजिनल कुल ईमेल
-  const [processedCount, setProcessedCount] = useState<number>(0); // भेजी जा चुकी ईमेल की संख्या
+  // Queue & Progress State
+  const [pendingEmails, setPendingEmails] = useState<string[]>([]);
+  const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
+  const [processedCount, setProcessedCount] = useState<number>(0);
   const [successCount, setSuccessCount] = useState<number>(0);
   
   const [loading, setLoading] = useState(false);
@@ -43,7 +43,7 @@ export default function Home() {
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
   const [lastBatchMessage, setLastBatchMessage] = useState<string>("");
 
-  // 1️⃣ लाइसेंस वेरिफिकेशन
+  // 1. License & Device Verification
   useEffect(() => {
     async function initSecurityAndLicense() {
       try {
@@ -94,24 +94,25 @@ export default function Home() {
     initSecurityAndLicense();
   }, []);
 
-  // 2️⃣ लोकल स्टोरेज से एक्टिव कतार लोड करना
+  // 2. Restore Active Campaign State from Local Storage
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        setPendingEmails(parsed.pendingEmails || []);
-        setInitialTotalCount(parsed.initialTotalCount || 0);
-        setProcessedCount(parsed.processedCount || 0);
-        setSuccessCount(parsed.successCount || 0);
-        setSenderName(parsed.senderName || "");
-        setSenderEmail(parsed.senderEmail || "");
-        setSubject(parsed.subject || "website design");
-        setTemplate(parsed.template || "");
-        setCustomSignoffName(parsed.customSignoffName ?? "");
-        setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
-        setIsCampaignStarted(parsed.isCampaignStarted || false);
-        if (parsed.pendingEmails && parsed.pendingEmails.length > 0) {
+        if (parsed.isCampaignStarted && parsed.pendingEmails && parsed.pendingEmails.length > 0) {
+          setPendingEmails(parsed.pendingEmails);
+          setInitialTotalCount(parsed.initialTotalCount || 0);
+          setProcessedCount(parsed.processedCount || 0);
+          setSuccessCount(parsed.successCount || 0);
+          setSenderName(parsed.senderName || "");
+          setSenderEmail(parsed.senderEmail || "");
+          setSubject(parsed.subject || "");
+          setTemplate(parsed.template || "");
+          setCustomSignoffName(parsed.customSignoffName || "");
+          setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
+          setAccountAgeMode(parsed.accountAgeMode || "AGED");
+          setIsCampaignStarted(true);
           setRawSheetData(parsed.pendingEmails.join("\n"));
         }
       } catch (e) {
@@ -120,7 +121,7 @@ export default function Home() {
     }
   }, []);
 
-  // 💾 केवल बची हुई (Pending) ईमेल और काउंट्स सेव करना
+  // Save State Helper
   const saveQueueState = (
     remainingList: string[],
     totalInit: number,
@@ -132,8 +133,14 @@ export default function Home() {
     tmpl: string,
     signName: string,
     bSize: number,
+    mode: AccountAgeMode,
     active: boolean
   ) => {
+    if (remainingList.length === 0) {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
@@ -147,6 +154,7 @@ export default function Home() {
         template: tmpl.trim(),
         customSignoffName: signName.trim(),
         batchSize: bSize,
+        accountAgeMode: mode,
         isCampaignStarted: active,
       })
     );
@@ -158,16 +166,18 @@ export default function Home() {
       return;
     }
     const num = parseInt(val, 10);
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     if (!isNaN(num)) {
-      setBatchSize(Math.min(num, MAX_ALLOWED_BATCH_SIZE));
+      setBatchSize(Math.min(num, maxLimit));
     }
   };
 
   const handleBatchSizeBlur = () => {
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) {
       setBatchSize(DEFAULT_BATCH_SIZE);
-    } else if (batchSize > MAX_ALLOWED_BATCH_SIZE) {
-      setBatchSize(MAX_ALLOWED_BATCH_SIZE);
+    } else if (batchSize > maxLimit) {
+      setBatchSize(maxLimit);
     }
   };
 
@@ -177,7 +187,7 @@ export default function Home() {
     return Array.from(new Set(matches.map((e) => e.trim().toLowerCase())));
   };
 
-  // 🚀 Step 1: कैंपेन शुरू करना
+  // Launch Campaign
   const handleStartCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
@@ -188,13 +198,19 @@ export default function Home() {
       return;
     }
 
+    const currentModeConfig = MODE_CONFIGS[accountAgeMode];
+    if (emails.length > currentModeConfig.maxLot) {
+      alert(`Mode Limit Exceeded: For ${currentModeConfig.label}, maximum allowed is ${currentModeConfig.maxLot} leads. You provided ${emails.length} leads.`);
+      return;
+    }
+
     const cleanName = senderName.trim();
     const cleanEmail = senderEmail.trim().toLowerCase();
     const cleanPass = appPassword.replace(/\s+/g, "");
     const cleanSub = subject.trim();
     const cleanTmpl = template.trim();
     const cleanSignName = customSignoffName.trim();
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : DEFAULT_BATCH_SIZE;
 
     setPendingEmails(emails);
     setInitialTotalCount(emails.length);
@@ -203,11 +219,11 @@ export default function Home() {
     setIsCampaignStarted(true);
     setLastBatchMessage("");
 
-    saveQueueState(emails, emails.length, 0, 0, cleanName, cleanEmail, cleanSub, cleanTmpl, cleanSignName, safeBatchSize, true);
-    await consumeQueueBatch(emails, emails.length, 0, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl, cleanSignName);
+    saveQueueState(emails, emails.length, 0, 0, cleanName, cleanEmail, cleanSub, cleanTmpl, cleanSignName, safeBatchSize, accountAgeMode, true);
+    await consumeQueueBatch(emails, emails.length, 0, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl, cleanSignName, accountAgeMode);
   };
 
-  // ⚙️ कतार को प्रोसेस और रिमूव करने वाला कोर इंजन
+  // Process and Rotate Queue
   const consumeQueueBatch = async (
     currentQueue: string[],
     totalInit: number,
@@ -219,15 +235,16 @@ export default function Home() {
     activePass: string,
     activeSub: string,
     activeTmpl: string,
-    activeSignName: string
+    activeSignName: string,
+    mode: AccountAgeMode
   ) => {
     if (currentQueue.length === 0) {
-      alert("🎉 All leads have been processed successfully!");
+      alert("All leads have been processed successfully!");
       return;
     }
 
     if (!activeEmail || !activePass) {
-      alert("Please fill in the Sender Email and App Password for this batch!");
+      alert("Please enter Sender Email and App Password for this batch!");
       return;
     }
 
@@ -235,21 +252,22 @@ export default function Home() {
     setLastBatchMessage("");
     let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
     
-    // इस बैच के लिए लीड्स निकालें (हमेशा Index 0 से)
     const batchToSend = currentQueue.slice(0, size);
     let workingQueue = [...currentQueue];
     let updatedProcessed = currentProcessed;
     let updatedSuccess = currentSuccess;
 
+    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 8;
+
     try {
       const currentMachineId = await getClientMachineId();
 
-      for (let i = 0; i < batchToSend.length; i += CHUNK_SIZE) {
-        const chunk = batchToSend.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < batchToSend.length; i += activeChunkSize) {
+        const chunk = batchToSend.slice(i, i + activeChunkSize);
         const startNum = i + 1;
-        const endNum = Math.min(i + CHUNK_SIZE, batchToSend.length);
+        const endNum = Math.min(i + activeChunkSize, batchToSend.length);
 
-        setProgressStatus(`Dispatching queue batch ${startNum} to ${endNum} of ${batchToSend.length}...`);
+        setProgressStatus(`Dispatching batch ${startNum} to ${endNum} of ${batchToSend.length} (${mode} mode)...`);
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -262,6 +280,7 @@ export default function Home() {
             subject: activeSub.trim(),
             template: activeTmpl.trim(),
             customSignoffName: activeSignName.trim(),
+            accountAgeMode: mode,
             machineId: currentMachineId,
             sessionToken: latestSessionToken,
           }),
@@ -298,17 +317,14 @@ export default function Home() {
         const chunkResults: { status: string }[] = data.report || [];
         const chunkSuccess = chunkResults.filter((r) => r.status === "SUCCESS").length;
         
-        // ✂️ जादुई लाइन: भेजी जा चुकी चंक को कतार से हमेशा के लिए हटा दें
         workingQueue = workingQueue.slice(chunk.length);
         updatedProcessed += chunk.length;
         updatedSuccess += chunkSuccess;
 
-        // स्टेट्स अपडेट
         setPendingEmails([...workingQueue]);
         setProcessedCount(updatedProcessed);
         setSuccessCount(updatedSuccess);
 
-        // 💾 लोकल स्टोरेज में भी केवल बची हुई ईमेल ही रहेंगी
         saveQueueState(
           workingQueue,
           totalInit,
@@ -320,26 +336,52 @@ export default function Home() {
           activeTmpl,
           activeSignName,
           size,
+          mode,
           true
         );
       }
 
       if (batchToSend.length > 0) {
-        setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched & removed from queue! Ready for next account.`);
+        setLastBatchMessage(`Batch of ${batchToSend.length} leads dispatched and removed from queue.`);
+      }
+
+      if (workingQueue.length === 0) {
+        setIsCampaignStarted(false);
+        setRawSheetData("");
+        setSubject("");
+        setTemplate("");
+        setCustomSignoffName("");
+        localStorage.removeItem(STORAGE_KEY);
       }
     } catch {
-      alert("Failed to connect to the server. Please check your connection!");
+      alert("Failed to connect to server. Please check your internet connection.");
     } finally {
       setLoading(false);
       setProgressStatus("");
     }
   };
 
-  // ▶️ अगला बैच भेजना (हमेशा 0 से उठाएगा)
+  // Dispatch Next Batch
   const handleNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, maxLimit) : DEFAULT_BATCH_SIZE;
+
+    saveQueueState(
+      pendingEmails,
+      initialTotalCount,
+      processedCount,
+      successCount,
+      senderName.trim(),
+      senderEmail.trim().toLowerCase(),
+      subject.trim(),
+      template.trim(),
+      customSignoffName.trim(),
+      safeBatchSize,
+      accountAgeMode,
+      true
+    );
 
     consumeQueueBatch(
       pendingEmails,
@@ -352,14 +394,15 @@ export default function Home() {
       appPassword.replace(/\s+/g, ""),
       subject.trim(),
       template.trim(),
-      customSignoffName.trim()
+      customSignoffName.trim(),
+      accountAgeMode
     );
   };
 
-  // 🔄 पूरा रीसेट: कतार, काउंट्स और लोकल स्टोरेज सब 100% खाली
+  // Reset Everything
   const handleFullReset = () => {
     if (loading) return;
-    if (confirm("Are you sure you want to reset the entire campaign? All progress and queue will be cleared.")) {
+    if (confirm("Are you sure you want to reset the campaign? All active progress and queue will be cleared.")) {
       localStorage.removeItem(STORAGE_KEY);
       setIsCampaignStarted(false);
       setPendingEmails([]);
@@ -370,9 +413,10 @@ export default function Home() {
       setAppPassword("");
       setSenderEmail("");
       setSenderName("");
-      setSubject("website design");
+      setSubject("");
       setTemplate("");
-      setCustomSignoffName("Ruby");
+      setCustomSignoffName("");
+      setAccountAgeMode("AGED");
       setBatchSize(DEFAULT_BATCH_SIZE);
       setProgressStatus("");
       setLastBatchMessage("");
@@ -402,6 +446,7 @@ export default function Home() {
   }
 
   const remainingCount = pendingEmails.length;
+  const currentMaxLot = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
   const currentBatchTarget = Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
 
   return (
@@ -434,7 +479,7 @@ export default function Home() {
           </button>
         </div>
 
-        {/* 🔢 Realtime Queue Statistics */}
+        {/* Realtime Statistics */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-slate-800/80 shadow-lg">
             <p className="text-[10px] text-slate-400 uppercase font-black tracking-wider">Total Leads</p>
@@ -510,12 +555,12 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Row 2: Target Leads (Left) + Header Name & Batch Size (Right) */}
+            {/* Row 2: Leads (Left) + Mode, Display Name & Batch Size (Right) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-xs font-bold text-slate-300 mb-1.5">Target Leads (Paste Sheet Column)</label>
                 <textarea
-                  rows={7}
+                  rows={9}
                   required
                   disabled={loading}
                   value={rawSheetData}
@@ -525,7 +570,33 @@ export default function Home() {
                 />
               </div>
 
-              <div className="space-y-4 flex flex-col justify-center">
+              <div className="space-y-3.5 flex flex-col justify-between">
+                <div>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-bold text-indigo-300">Account Trust / Age Mode</label>
+                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+                      {MODE_CONFIGS[accountAgeMode]?.badge}
+                    </span>
+                  </div>
+                  <select
+                    disabled={loading}
+                    value={accountAgeMode}
+                    onChange={(e) => {
+                      const newMode = e.target.value as AccountAgeMode;
+                      setAccountAgeMode(newMode);
+                      const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
+                      if (batchSize > maxLimit) {
+                        setBatchSize(maxLimit);
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 focus:border-indigo-500 outline-none transition cursor-pointer"
+                  >
+                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads (8/Chunk)</option>
+                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads (6/Chunk)</option>
+                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads (4/Chunk)</option>
+                  </select>
+                </div>
+
                 <div>
                   <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Header Display Name</label>
                   <input
@@ -535,26 +606,27 @@ export default function Home() {
                     value={senderName}
                     onChange={(e) => setSenderName(e.target.value)}
                     onBlur={(e) => setSenderName(e.target.value.trim())}
-                    placeholder="e.g. Ruby Support"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
+                    placeholder="e.g. Sales Team / Your Name"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                    Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
-                  </label>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-bold text-slate-300">Batch Size</label>
+                    <span className="text-[10px] text-slate-400 font-mono">Max: {currentMaxLot}</span>
+                  </div>
                   <input
                     type="number"
                     min={MIN_ALLOWED_BATCH_SIZE}
-                    max={MAX_ALLOWED_BATCH_SIZE}
+                    max={currentMaxLot}
                     required
                     disabled={loading}
                     value={batchSize || ""}
                     onChange={(e) => handleBatchSizeChange(e.target.value)}
                     onBlur={handleBatchSizeBlur}
                     placeholder={String(DEFAULT_BATCH_SIZE)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-indigo-400 font-black focus:border-indigo-500 outline-none transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-indigo-400 font-black focus:border-indigo-500 outline-none transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                   />
                 </div>
               </div>
@@ -570,7 +642,7 @@ export default function Home() {
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 onBlur={(e) => setSubject(e.target.value.trim())}
-                placeholder="e.g. Quick question regarding website design"
+                placeholder="e.g. Quick question regarding project inquiry"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
               />
             </div>
@@ -589,10 +661,10 @@ export default function Home() {
               />
             </div>
 
-            {/* Row 5: Dynamic Signoff Name */}
+            {/* Row 5: Custom Signoff / Footer Block */}
             <div className="w-full bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80">
               <label className="block text-xs font-bold text-emerald-400 mb-1.5">
-                Dynamic Sign-off Name (e.g. Ruby, Neelam, Babu)
+                Custom Footer & Signature Details (Name, Company, Brand)
               </label>
               <input
                 type="text"
@@ -600,11 +672,11 @@ export default function Home() {
                 value={customSignoffName}
                 onChange={(e) => setCustomSignoffName(e.target.value)}
                 onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
-                placeholder="e.g. Ruby"
+                placeholder="e.g. John Doe | Founder at Acme Corp"
                 className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-bold transition"
               />
               <p className="text-[11px] text-slate-400 mt-1.5">
-                💡 Human-like signoffs will auto-rotate dynamically above this name.
+                Leave empty to fallback automatically to Sender Display Name.
               </p>
             </div>
 
@@ -636,6 +708,28 @@ export default function Home() {
                   <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-1 rounded-full border border-amber-500/20">
                     Remaining in Queue: {remainingCount}
                   </span>
+                </div>
+
+                {/* Mode Selector */}
+                <div>
+                  <label className="block text-xs font-bold text-indigo-300 mb-1.5">Account Trust / Age Mode</label>
+                  <select
+                    disabled={loading}
+                    value={accountAgeMode}
+                    onChange={(e) => {
+                      const newMode = e.target.value as AccountAgeMode;
+                      setAccountAgeMode(newMode);
+                      const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
+                      if (batchSize > maxLimit) {
+                        setBatchSize(maxLimit);
+                      }
+                    }}
+                    className="w-full bg-slate-900 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads (8/Chunk)</option>
+                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads (6/Chunk)</option>
+                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads (4/Chunk)</option>
+                  </select>
                 </div>
 
                 {/* Account Switch Inputs */}
@@ -679,6 +773,7 @@ export default function Home() {
                       value={senderName}
                       onChange={(e) => setSenderName(e.target.value)}
                       onBlur={(e) => setSenderName(e.target.value.trim())}
+                      placeholder="e.g. Sales Lead / Support"
                       className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
                     />
                   </div>
@@ -687,7 +782,7 @@ export default function Home() {
                     <input
                       type="number"
                       min={MIN_ALLOWED_BATCH_SIZE}
-                      max={MAX_ALLOWED_BATCH_SIZE}
+                      max={currentMaxLot}
                       required
                       disabled={loading}
                       value={batchSize || ""}
@@ -708,6 +803,7 @@ export default function Home() {
                     value={subject}
                     onChange={(e) => setSubject(e.target.value)}
                     onBlur={(e) => setSubject(e.target.value.trim())}
+                    placeholder="e.g. Quick question regarding partnership / inquiry"
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
                   />
                 </div>
@@ -725,15 +821,16 @@ export default function Home() {
                   />
                 </div>
 
-                {/* Sign-off Bottom Name */}
+                {/* Sign-off Footer / Signature */}
                 <div className="w-full">
-                  <label className="block text-xs font-bold text-emerald-400 mb-1.5">Sign-off Bottom Name</label>
+                  <label className="block text-xs font-bold text-emerald-400 mb-1.5">Custom Footer & Signature Details (Name, Company, Brand)</label>
                   <input
                     type="text"
                     disabled={loading}
                     value={customSignoffName}
                     onChange={(e) => setCustomSignoffName(e.target.value)}
                     onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
+                    placeholder="e.g. John Doe | Founder at Acme Corp"
                     className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-4 py-2 text-sm text-slate-100 outline-none font-semibold focus:border-emerald-500"
                   />
                 </div>
