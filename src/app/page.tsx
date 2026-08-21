@@ -32,7 +32,7 @@ export default function Home() {
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
-  // Queue & Progress State
+  // Queue & Progress State (Supports 1000s of Leads)
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
@@ -72,10 +72,11 @@ export default function Home() {
           if (data.reason === "EXPIRED") {
             setUserType("EXPIRED");
             setExpiryDate(data.expiryDate || "Expired");
-          } else if (data.reason === "NEW_DEVICE") {
-            setUserType("NEW_USER");
-          } else {
+          } else if (data.reason === "SUSPENDED") {
             setUserType("SUSPENDED");
+          } else {
+            // NEW_DEVICE or Unregistered Domain default
+            setUserType("NEW_USER");
           }
         } else {
           setIsSuspended(false);
@@ -187,7 +188,7 @@ export default function Home() {
     return Array.from(new Set(matches.map((e) => e.trim().toLowerCase())));
   };
 
-  // Launch Campaign
+  // Launch Campaign (Unlimited Queue Allowed)
   const handleStartCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
@@ -199,10 +200,11 @@ export default function Home() {
     }
 
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    if (emails.length > currentModeConfig.maxLot) {
-      alert(`Mode Limit Exceeded: For ${currentModeConfig.label}, maximum allowed is ${currentModeConfig.maxLot} leads. You provided ${emails.length} leads.`);
-      return;
-    }
+    
+    // 🔒 Only clamp batchSize to the mode's maxLot (Queue itself is unlimited)
+    const safeBatchSize = batchSize > 0 
+      ? Math.min(batchSize, currentModeConfig.maxLot) 
+      : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
 
     const cleanName = senderName.trim();
     const cleanEmail = senderEmail.trim().toLowerCase();
@@ -210,7 +212,6 @@ export default function Home() {
     const cleanSub = subject.trim();
     const cleanTmpl = template.trim();
     const cleanSignName = customSignoffName.trim();
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : DEFAULT_BATCH_SIZE;
 
     setPendingEmails(emails);
     setInitialTotalCount(emails.length);
@@ -293,10 +294,10 @@ export default function Home() {
           if (data.reason === "EXPIRED") {
             setUserType("EXPIRED");
             setExpiryDate(data.expiryDate || "Expired");
-          } else if (data.reason === "NEW_DEVICE") {
-            setUserType("NEW_USER");
-          } else {
+          } else if (data.reason === "SUSPENDED") {
             setUserType("SUSPENDED");
+          } else {
+            setUserType("NEW_USER");
           }
           if (data.clearSession) {
             localStorage.removeItem(SESSION_TOKEN_KEY);
@@ -342,9 +343,10 @@ export default function Home() {
       }
 
       if (batchToSend.length > 0) {
-        setLastBatchMessage(`Batch of ${batchToSend.length} leads dispatched and removed from queue.`);
+        setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched and removed from queue.`);
       }
 
+      // Automatically clean up when queue is completely empty
       if (workingQueue.length === 0) {
         setIsCampaignStarted(false);
         setRawSheetData("");
@@ -558,7 +560,7 @@ export default function Home() {
             {/* Row 2: Leads (Left) + Mode, Display Name & Batch Size (Right) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1.5">Target Leads (Paste Sheet Column)</label>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5">Target Leads (Paste Sheet Column - Unlimited)</label>
                 <textarea
                   rows={9}
                   required
@@ -591,9 +593,9 @@ export default function Home() {
                     }}
                     className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 focus:border-indigo-500 outline-none transition cursor-pointer"
                   >
-                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads (8/Chunk)</option>
-                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads (6/Chunk)</option>
-                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads (4/Chunk)</option>
+                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads / Batch (8/Chunk)</option>
+                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads / Batch (6/Chunk)</option>
+                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads / Batch (4/Chunk)</option>
                   </select>
                 </div>
 
@@ -691,7 +693,7 @@ export default function Home() {
                   <span>Dispatching Batch 1...</span>
                 </>
               ) : (
-                `🚀 Launch Campaign & Send Batch 1 (${batchSize || DEFAULT_BATCH_SIZE} Leads)`
+                `🚀 Launch Campaign & Send Batch 1 (${Math.min(batchSize || DEFAULT_BATCH_SIZE, currentMaxLot)} Leads)`
               )}
             </button>
           </form>
@@ -726,9 +728,9 @@ export default function Home() {
                     }}
                     className="w-full bg-slate-900 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
                   >
-                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads (8/Chunk)</option>
-                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads (6/Chunk)</option>
-                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads (4/Chunk)</option>
+                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads / Batch (8/Chunk)</option>
+                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads / Batch (6/Chunk)</option>
+                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads / Batch (4/Chunk)</option>
                   </select>
                 </div>
 
