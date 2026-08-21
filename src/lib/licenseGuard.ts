@@ -1,11 +1,10 @@
-// src/lib/licenseGuard.ts
 import crypto from "crypto";
 import { connectToDatabase } from "@/lib/db";
 import { LicenseModel } from "@/lib/models/License";
 
 export const ENABLE_DEVICE_LOCK = true;
 
-// 🔒 सुरक्षित रूप से .env से सीक्रेट प्राप्त करने वाला हेल्पर (कोई फ़ॉलबैक स्ट्रिंग नहीं)
+// 🔒 सुरक्षित रूप से .env से सीक्रेट प्राप्त करने वाला हेल्पर
 function getAdminSecret(): string {
   const secret = process.env.ADMIN_SECRET_KEY;
   if (!secret) {
@@ -25,7 +24,7 @@ export function cleanAppDomain(input: string): string {
     .split(":")[0];
 }
 
-// 🔐 टोकन जनरेशन (सर्वर-साइड सीक्रेट का उपयोग करके)
+// 🔐 टोकन जनरेशन
 function generateDailyToken(domain: string, machineId: string, resetTime: number = 0): string {
   const secret = getAdminSecret();
   const today = new Date().toISOString().slice(0, 10);
@@ -57,7 +56,7 @@ function verifyDailyToken(token: string, domain: string, machineId: string, expe
 
 export interface GuardResult {
   ok: boolean;
-  reason?: "NEW_USER" | "SUSPENDED" | "EXPIRED" | "ACTIVE";
+  reason?: "NEW_DEVICE" | "SUSPENDED" | "EXPIRED" | "ACTIVE"; // 👈 NEW_USER को NEW_DEVICE से फिक्स किया
   expiryDate?: string;
   error?: string;
   sessionToken?: string;
@@ -72,7 +71,7 @@ export async function verifyLicenseAndDevice(
   if (!ENABLE_DEVICE_LOCK) return { ok: true, reason: "ACTIVE" };
 
   if (!machineId) {
-    return { ok: false, reason: "NEW_USER", error: "Security Alert: Machine fingerprint missing." };
+    return { ok: false, reason: "NEW_DEVICE", error: "Security Alert: Machine fingerprint missing." };
   }
 
   const appDomain = cleanAppDomain(rawAppDomain);
@@ -82,12 +81,12 @@ export async function verifyLicenseAndDevice(
 
     const license = await LicenseModel.findOne({ appDomain });
 
-    // 1️⃣ अगर डोमेन डेटाबेस में नहीं है
+    // 1️⃣ अगर डोमेन डेटाबेस में नहीं है (नया डोमेन / नई मशीन)
     if (!license) {
       return {
         ok: false,
-        reason: "NEW_USER",
-        error: `App Domain (${appDomain}) is not whitelisted. Please contact Admin.`,
+        reason: "NEW_DEVICE",
+        error: `App Domain (${appDomain}) is not registered. Please contact Admin.`,
         clearClientSession: true,
       };
     }
@@ -107,13 +106,13 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // 3️⃣ डोमेन शेयरिंग रोकथाम (अगर डोमेन पर दूसरी मशीन बंधी है)
+    // 3️⃣ अगर डोमेन पर पहले से दूसरी मशीन लॉक है (नया डिवाइस)
     if (license.lockedDeviceId && license.lockedDeviceId !== machineId) {
       return {
         ok: false,
-        reason: "NEW_USER",
+        reason: "NEW_DEVICE",
         expiryDate: formattedExpiry,
-        error: "New Device on existing domain. Please request a new account from Admin.",
+        error: "New Device detected on this domain. Please register this machine with Admin.",
         clearClientSession: true,
       };
     }
@@ -124,7 +123,7 @@ export async function verifyLicenseAndDevice(
         ok: false,
         reason: "SUSPENDED",
         expiryDate: formattedExpiry,
-        error: "License Suspended: Account is inactive. Contact Admin.",
+        error: "License Suspended: Account is on hold. Contact Admin.",
         clearClientSession: true,
       };
     }
@@ -148,6 +147,6 @@ export async function verifyLicenseAndDevice(
     return { ok: true, reason: "ACTIVE", sessionToken: newDailyToken, expiryDate: formattedExpiry };
 
   } catch (err: any) {
-    return { ok: false, reason: "SUSPENDED", error: "Database Error: " + err.message };
+    return { ok: false, reason: "NEW_DEVICE", error: "Database Connection Error: " + err.message };
   }
 }

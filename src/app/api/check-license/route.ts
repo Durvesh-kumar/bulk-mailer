@@ -1,4 +1,3 @@
-// app/api/check-license/route.ts
 import { NextResponse } from "next/server";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 
@@ -15,7 +14,7 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           allowed: false,
-          reason: result.reason || "SUSPENDED",
+          reason: result.reason || "NEW_DEVICE", // 👈 फ़ॉलबाइक NEW_DEVICE सेट किया
           expiryDate: result.expiryDate || "",
           error: result.error,
           clearSession: result.clearClientSession || false,
@@ -34,7 +33,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         allowed: false,
-        reason: "SUSPENDED",
+        reason: "NEW_DEVICE",
         error: error.message || "License check failed",
       },
       { status: 500 }
