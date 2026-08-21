@@ -80,7 +80,7 @@ jobs:
           vercel --prod \
             --token=${{ secrets.PERSONAL_VERCEL_TOKEN }} \
             --scope=${{ secrets.PERSONAL_VERCEL_ORG_ID }} \
-            --name=inboxSend \
+            --name=inboxsend \
             --yes
 
   # -------------------------------------------------------------
@@ -117,5 +117,5 @@ jobs:
           vercel --prod \
             --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
             --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
-            --name=inboxSend-manish \
+            --name=inboxsend-manish \
             --yes
