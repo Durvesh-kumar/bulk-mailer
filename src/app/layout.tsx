@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "InboxFlow",
+  title: "InboxSend - B2B Cold Outreach Automation",
   description:
     "Streamline B2B cold outreach with automated multi-account rotation, smart delay scheduling, and high inbox delivery rates.",
   keywords: [
