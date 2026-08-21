@@ -82,7 +82,7 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.PERSONAL_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.PERSONAL_VERCEL_ORG_ID }}
         run: |
-          npx vercel deploy --prod --yes --token=${{ secrets.PERSONAL_VERCEL_TOKEN }}
+          npx vercel deploy --prod --yes --name=inboxsend --token=${{ secrets.PERSONAL_VERCEL_TOKEN }}
 
   # -------------------------------------------------------------
   # 3. DEPLOY TO MANISH VERCEL
@@ -117,4 +117,4 @@ jobs:
           VERCEL_TOKEN: ${{ secrets.MANISH_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.MANISH_VERCEL_ORG_ID }}
         run: |
-          npx vercel deploy --prod --yes --token=${{ secrets.MANISH_VERCEL_TOKEN }}
+          npx vercel deploy --prod --yes --name=inboxsend-manish --token=${{ secrets.MANISH_VERCEL_TOKEN }}
