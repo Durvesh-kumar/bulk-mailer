@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target_account:
-        description: 'Which account do you want to deploy to?'
+        description: 'Select Target'
         required: true
         default: 'all'
         type: choice
@@ -15,107 +15,38 @@ on:
 
 jobs:
   # -------------------------------------------------------------
-  # 1. BUILD VALIDATION GATEWAY
-  # -------------------------------------------------------------
-  build-check:
-    name: Validate Next.js Build
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_TOKEN }}
-
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: 'npm'
-
-      - name: Install Dependencies
-        run: npm ci
-
-      - name: Inject Build Environment Variables
-        run: |
-          cat <<EOF > .env.production
-          NODE_ENV=production
-          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
-          ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
-          MONGODB_URI=${{ secrets.MONGODB_URI }}
-          EOF
-
-      - name: Run Next.js Production Build
-        run: npm run build
-
-  # -------------------------------------------------------------
-  # 2. DEPLOY TO PERSONAL VERCEL
+  # 1. DEPLOY TO PERSONAL VERCEL
   # -------------------------------------------------------------
   deploy-personal:
     name: Deploy to Personal Account
-    needs: [build-check]
     if: ${{ github.event.inputs.target_account == 'personal' || github.event.inputs.target_account == 'all' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_TOKEN }}
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Inject Secure Environment Variables
-        run: |
-          cat <<EOF > .env.production
-          NODE_ENV=production
-          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
-          ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
-          MONGODB_URI=${{ secrets.MONGODB_URI }}
-          EOF
-
-      - name: Deploy to Personal Vercel (Non-Interactive)
+      - name: Deploy Direct to Personal Vercel
         env:
-          VERCEL_TOKEN: ${{ secrets.PERSONAL_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.PERSONAL_VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.PERSONAL_VERCEL_PROJECT_ID }}
         run: |
           npx vercel deploy --prod --yes --token=${{ secrets.PERSONAL_VERCEL_TOKEN }}
 
   # -------------------------------------------------------------
-  # 3. DEPLOY TO MANISH VERCEL
+  # 2. DEPLOY TO MANISH VERCEL
   # -------------------------------------------------------------
   deploy-manish:
     name: Deploy to Manish Account
-    needs: [build-check]
     if: ${{ github.event.inputs.target_account == 'manish' || github.event.inputs.target_account == 'all' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_TOKEN }}
 
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Inject Secure Environment Variables
-        run: |
-          cat <<EOF > .env.production
-          NODE_ENV=production
-          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
-          MONGODB_URI=${{ secrets.MONGODB_URI }}
-          EOF
-
-      - name: Deploy to Manish Vercel (Non-Interactive)
+      - name: Deploy Direct to Manish Vercel
         env:
-          VERCEL_TOKEN: ${{ secrets.MANISH_VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.MANISH_VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.MANISH_VERCEL_PROJECT_ID }}
         run: |
