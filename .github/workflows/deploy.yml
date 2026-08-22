@@ -12,6 +12,7 @@ on:
           - all
           - personal
           - manish
+          - amit
 
 jobs:
   # -------------------------------------------------------------
@@ -125,7 +126,7 @@ jobs:
   deploy-amit:
     name: Deploy to Amit Account
     needs: [build-check]
-    if: ${{ github.event.inputs.target_account == 'manish' || github.event.inputs.target_account == 'all' }}
+    if: ${{ github.event.inputs.target_account == 'amit' || github.event.inputs.target_account == 'all' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
