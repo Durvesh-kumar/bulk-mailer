@@ -148,7 +148,7 @@ jobs:
           MONGODB_URI=${{ secrets.MONGODB_URI }}
           EOF
 
-      - name: Deploy to Manish Vercel
+      - name: Deploy to Amit Vercel
         run: |
           vercel --prod \
             --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
