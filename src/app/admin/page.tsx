@@ -12,13 +12,18 @@ interface License {
   expiresAt: string;
 }
 
-function calculateFutureExpiry(months: number): { formatted: string; daysCount: number } {
+function calculateFutureExpiry(months: number, days?: number): { formatted: string; daysCount: number } {
   const target = new Date();
-  const currentDay = target.getDate();
-  target.setMonth(target.getMonth() + months);
 
-  if (target.getDate() < currentDay) {
-    target.setDate(0);
+  if (days && days > 0) {
+    target.setDate(target.getDate() + days);
+  } else {
+    const currentDay = target.getDate();
+    target.setMonth(target.getMonth() + months);
+
+    if (target.getDate() < currentDay) {
+      target.setDate(0);
+    }
   }
 
   const diffTime = target.getTime() - new Date().getTime();
@@ -43,11 +48,12 @@ export default function AdminDashboard() {
   const [newDomain, setNewDomain] = useState("");
   const [newClient, setNewClient] = useState("");
   const [validityMonths, setValidityMonths] = useState<number>(1);
+  const [validityDays, setValidityDays] = useState<number | null>(null);
 
   const [feedback, setFeedback] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const preview = calculateFutureExpiry(Number(validityMonths) || 1);
+  const preview = calculateFutureExpiry(Number(validityMonths) || 1, validityDays || undefined);
 
   const fetchLicenses = async (key = adminKey) => {
     if (!key.trim()) {
@@ -83,7 +89,6 @@ export default function AdminDashboard() {
       return;
     }
 
-    const months = Math.max(1, Number(validityMonths) || 1);
     setFeedback("");
     setLoading(true);
 
@@ -98,7 +103,8 @@ export default function AdminDashboard() {
           action: "CREATE_APP_DOMAIN",
           appDomain: newDomain.trim(),
           clientName: newClient.trim() || "Client",
-          validityMonths: months,
+          validityDays: validityDays || undefined,
+          validityMonths: validityDays ? undefined : Math.max(1, Number(validityMonths) || 1),
         }),
       });
       const data = await res.json();
@@ -107,6 +113,7 @@ export default function AdminDashboard() {
         setNewDomain("");
         setNewClient("");
         setValidityMonths(1);
+        setValidityDays(null);
         fetchLicenses(adminKey);
       } else {
         setFeedback(data.error || "Creation failed");
@@ -308,19 +315,30 @@ export default function AdminDashboard() {
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold text-slate-400 mb-1">Validity (Months)</label>
+              <label className="block text-[11px] font-semibold text-slate-400 mb-1">
+                Validity {validityDays ? "(Days)" : "(Months)"}
+              </label>
               <div className="relative">
                 <input
                   type="number"
                   min={1}
-                  max={60}
-                  placeholder="Enter months (1, 2, 7, 12...)"
+                  max={validityDays ? 365 : 60}
+                  placeholder="Enter validity"
                   className="w-full bg-slate-950 border border-amber-500/40 rounded-xl px-3.5 py-2.5 text-xs text-amber-400 font-bold outline-none focus:border-amber-400 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none font-mono"
-                  value={validityMonths}
-                  onChange={(e) => setValidityMonths(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  value={validityDays ? validityDays : validityMonths}
+                  onChange={(e) => {
+                    const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                    if (validityDays) {
+                      setValidityDays(val);
+                    } else {
+                      setValidityMonths(val);
+                    }
+                  }}
                   required
                 />
-                <span className="absolute right-3 top-2.5 text-[11px] font-semibold text-slate-500">Months</span>
+                <span className="absolute right-3 top-2.5 text-[11px] font-semibold text-slate-500">
+                  {validityDays ? "Days" : "Months"}
+                </span>
               </div>
             </div>
           </div>
@@ -328,13 +346,32 @@ export default function AdminDashboard() {
           {/* Quick Select Chips */}
           <div className="flex flex-wrap items-center gap-1.5 pt-1">
             <span className="text-[10px] text-slate-500 font-semibold mr-1">Quick Select:</span>
+            
+            {/* ⚡ 7 Days Trial Chip */}
+            <button
+              type="button"
+              onClick={() => {
+                setValidityDays(7);
+              }}
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold transition cursor-pointer ${
+                validityDays === 7
+                  ? "bg-cyan-500/25 text-cyan-300 border border-cyan-400"
+                  : "bg-slate-950 hover:bg-slate-800 text-cyan-400/80 border border-slate-800"
+              }`}
+            >
+              ⚡ 7 Days (Trial)
+            </button>
+
             {[1, 2, 3, 6, 7, 9, 12, 24].map((m) => (
               <button
                 key={m}
                 type="button"
-                onClick={() => setValidityMonths(m)}
+                onClick={() => {
+                  setValidityDays(null);
+                  setValidityMonths(m);
+                }}
                 className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-semibold transition cursor-pointer ${
-                  validityMonths === m
+                  !validityDays && validityMonths === m
                     ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
                     : "bg-slate-950 hover:bg-slate-800 text-slate-400 border border-slate-800"
                 }`}
@@ -349,7 +386,7 @@ export default function AdminDashboard() {
             disabled={loading}
             className="w-full sm:w-auto px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs transition shadow-lg disabled:opacity-50 cursor-pointer"
           >
-            {loading ? "Saving..." : `🚀 Whitelist Domain for ${validityMonths} Month(s)`}
+            {loading ? "Saving..." : `🚀 Whitelist Domain for ${validityDays ? `${validityDays} Day(s)` : `${validityMonths} Month(s)`}`}
           </button>
         </form>
 
