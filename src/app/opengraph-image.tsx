@@ -2,7 +2,7 @@ import { ImageResponse } from "next/og";
 
 export const runtime = "edge";
 
-export const alt = "InboxFlow — High-Performance Cold Outreach";
+export const alt = "InboxSend — High-Performance Cold Outreach";
 export const size = {
   width: 1200,
   height: 630,

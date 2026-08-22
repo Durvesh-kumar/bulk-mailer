@@ -12,17 +12,54 @@ on:
           - all
           - personal
           - manish
+          - amit
 
 jobs:
-  # 1. Deploy to Personal Vercel
+  # -------------------------------------------------------------
+  # 1. BUILD VALIDATION GATEWAY (सबसे पहले बिल्ड टेस्ट होगा)
+  # -------------------------------------------------------------
+  build-check:
+    name: Validate Next.js Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      # बिल्ड के समय अगर Next.js को एनवायरनमेंट वेरिएबल्स की ज़रूरत पड़े
+      - name: Inject Build Environment Variables
+        run: |
+          cat <<EOF > .env.production
+          NODE_ENV=production
+          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
+          ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          EOF
+
+      - name: Run Next.js Production Build
+        run: npm run build
+
+  # -------------------------------------------------------------
+  # 2. DEPLOY TO PERSONAL VERCEL (सिर्फ तभी चलेगा जब बिल्ड पास होगा)
+  # -------------------------------------------------------------
   deploy-personal:
+    name: Deploy to Personal Account
+    needs: [build-check]
     if: ${{ github.event.inputs.target_account == 'personal' || github.event.inputs.target_account == 'all' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -30,7 +67,6 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
-      # 🔒 GitHub Action generates the .env.production file
       - name: Inject Secure Environment Variables
         run: |
           cat <<EOF > .env.production
@@ -40,23 +76,27 @@ jobs:
           MONGODB_URI=${{ secrets.MONGODB_URI }}
           EOF
 
-      - name: Build and Deploy to Personal Vercel
+      - name: Deploy to Personal Vercel
         run: |
           vercel --prod \
             --token=${{ secrets.PERSONAL_VERCEL_TOKEN }} \
             --scope=${{ secrets.PERSONAL_VERCEL_ORG_ID }} \
-            --name=inboxflow \
+            --name=inboxsend \
             --yes
 
-  # 2. Deploy to Manish Vercel
+  # -------------------------------------------------------------
+  # 3. DEPLOY TO MANISH VERCEL (सिर्फ तभी चलेगा जब बिल्ड पास होगा)
+  # -------------------------------------------------------------
   deploy-manish:
+    name: Deploy to Manish Account
+    needs: [build-check]
     if: ${{ github.event.inputs.target_account == 'manish' || github.event.inputs.target_account == 'all' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node.js 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -64,7 +104,6 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
-      # 🔒 Inject secrets for Manish from GitHub Actions
       - name: Inject Secure Environment Variables
         run: |
           cat <<EOF > .env.production
@@ -73,10 +112,46 @@ jobs:
           MONGODB_URI=${{ secrets.MONGODB_URI }}
           EOF
 
-      - name: Build and Deploy to Manish Vercel
+      - name: Deploy to Manish Vercel
         run: |
           vercel --prod \
             --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
             --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
-            --name=inboxflow-manish \
+            --name=inboxsend-manish \
+            --yes
+
+  # -------------------------------------------------------------
+  # 4. DEPLOY TO AMIT VERCEL (सिर्फ तभी चलेगा जब बिल्ड पास होगा)
+  # -------------------------------------------------------------
+  deploy-amit:
+    name: Deploy to Amit Account
+    needs: [build-check]
+    if: ${{ github.event.inputs.target_account == 'amit' || github.event.inputs.target_account == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Inject Secure Environment Variables
+        run: |
+          cat <<EOF > .env.production
+          NODE_ENV=production
+          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          EOF
+
+      - name: Deploy to Amit Vercel
+        run: |
+          vercel --prod \
+            --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
+            --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
+            --name=inboxsend-amit \
             --yes

@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
+import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
+import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 
-// 🔒 1.5s से 2.5s का नेचुरल रैंडम डिले
-const sleepRandom = (min = 3500, max = 4000): Promise<void> => {
+const sleepRandom = (min: number, max: number): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
@@ -12,34 +13,24 @@ const pickRandom = (arr: string[]): string => {
   return arr[Math.floor(Math.random() * arr.length)];
 };
 
-// Spintax वेरिएशन्स
-const GREETINGS = ["Hi,", "Hello,", "Hey,", "Hi there,"];
-const OPENERS = [
-  "Hope you are having a productive week.",
-  "Hope this note finds you well.",
-  "Hope everything is going well on your end.",
-  "Reaching out to quickly connect.",
-];
-const SIGN_OFFS = ["Best regards,", "Thanks & regards,", "Warm regards,", "Best,", "Thanks,"];
-
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { 
-      senderName, 
-      senderEmail, 
-      appPassword, 
-      recipients, 
-      subject, 
-      template, 
+    const {
+      senderName,
+      senderEmail,
+      appPassword,
+      recipients,
+      subject,
+      template,
       customSignoffName,
       machineId,
-      sessionToken 
+      sessionToken,
+      accountAgeMode = "AGED",
     } = body;
 
-    // 1. इनपुट वैलिडेशन
     if (!senderEmail || !appPassword || !recipients?.length || !subject || !template) {
       return NextResponse.json(
         { error: "Please fill in all required fields (Sender Email, App Password, Leads, Subject, Body)." },
@@ -47,16 +38,31 @@ export async function POST(req: Request) {
       );
     }
 
+    // 🔒 @/config/accountModes से मोड कॉन्फ़िगरेशन लोड करना
+    const selectedMode: AccountAgeMode = (
+      MODE_CONFIGS[accountAgeMode as AccountAgeMode] ? accountAgeMode : "AGED"
+    ) as AccountAgeMode;
+    const rule = MODE_CONFIGS[selectedMode];
+
+    // सुरक्षा नियम: अगर यूजर मोड लिमिट से ज्यादा लीड्स भेजता है
+    if (recipients.length > rule.maxLot) {
+      return NextResponse.json(
+        {
+          error: `Safety Limit Exceeded: For ${selectedMode} accounts, maximum allowed emails per batch is ${rule.maxLot}. You submitted ${recipients.length}.`,
+        },
+        { status: 400 }
+      );
+    }
+
     const hostHeader =
       req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost";
 
-    // 2. लाइसेंस, डिवाइस और सेशन वेरिफिकेशन
     const guard = await verifyLicenseAndDevice(hostHeader, machineId, sessionToken);
     if (!guard.ok) {
       return NextResponse.json(
-        { 
+        {
           error: guard.error || "License verification failed.",
-          clearSession: guard.clearClientSession || false 
+          clearSession: guard.clearClientSession || false,
         },
         { status: 403 }
       );
@@ -66,12 +72,13 @@ export async function POST(req: Request) {
     const cleanPassword = appPassword.replace(/\s+/g, "");
     const cleanHeaderName = (senderName || "Ruby").trim();
 
-    // नीचे का नाम (अगर कस्टम नाम दिया है तो वो, नहीं तो हेडर नाम)
-    const finalSignoffName = (customSignoffName && customSignoffName.trim().length > 0)
-      ? customSignoffName.trim()
-      : cleanHeaderName;
+    // 🔒 साइन-ऑफ नाम लॉजिक: अगर कस्टम नाम नहीं है या खाली है, तो सेंडर का नाम ही जाएगा
+    const finalSignoffName =
+      customSignoffName && customSignoffName.trim().length > 0
+        ? customSignoffName.trim()
+        : cleanHeaderName;
 
-    // 3. ऑथेंटिक Gmail SMTP सेटअप
+    // 🔒 SMTP Connection Pool (Max 3 Connections)
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
@@ -80,6 +87,9 @@ export async function POST(req: Request) {
         user: cleanSender,
         pass: cleanPassword,
       },
+      pool: true,
+      maxConnections: 3,
+      maxMessages: 100,
       name: "mail.google.com",
     });
 
@@ -94,7 +104,16 @@ export async function POST(req: Request) {
 
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
 
-    // 4. ईमेल डिस्पैच लूप
+    // यूजर के टेम्पलेट से डुप्लिकेट ग्रीटिंग/ओपनर लाइन्स को सुरक्षित रूप से क्लीन करना
+    const cleanUserBody = template
+      .trim()
+      .replace(/^(hi|hello|hey|greetings|dear)[^\n]*\n+/i, "")
+      .replace(
+        /^(hope this note finds you well|hope you are having a productive week|hope you are doing well|hope everything is going well|reaching out to quickly connect)[^\n]*\n+/i,
+        ""
+      )
+      .trim();
+
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
 
@@ -102,15 +121,10 @@ export async function POST(req: Request) {
       const randomOpener = pickRandom(OPENERS);
       const randomSignOff = pickRandom(SIGN_OFFS);
 
-      let cleanUserBody = template.trim()
-        .replace(/^(hi|hello|hey|greetings)[^\n]*\n+/i, "")
-        .replace(/^(hope this note finds you well|hope you are having a productive week|reaching out to quickly connect)[^\n]*\n+/i, "");
-
-      // 💡 1 स्पेस (लाइन ब्रेक) के साथ साफ़ फॉर्मेट
+      // रैंडम ग्रीटिंग + रैंडम ओपनर + यूजर की क्लीन बॉडी + रैंडम साइनऑफ + फाइनल नाम
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n\n${finalSignoffName}`;
 
       try {
-        // ✅ Gmail खुद DKIM और 100% असली Message-ID साइन करेगा
         await transporter.sendMail({
           from: `"${cleanHeaderName}" <${cleanSender}>`,
           to: recipientEmail,
@@ -121,16 +135,23 @@ export async function POST(req: Request) {
         logs.push({ email: recipientEmail, status: "SUCCESS" });
 
         if (i < recipients.length - 1) {
-          await sleepRandom(1500, 2500);
+          await sleepRandom(rule.minDelay, rule.maxDelay);
         }
       } catch (err: any) {
-        logs.push({ email: recipientEmail, status: "FAILED", error: "Failed to send: " + err.message });
+        logs.push({
+          email: recipientEmail,
+          status: "FAILED",
+          error: "Failed to send: " + err.message,
+        });
       }
     }
 
-    return NextResponse.json({ 
+    transporter.close();
+
+    return NextResponse.json({
       report: logs,
-      sessionToken: guard.sessionToken 
+      sessionToken: guard.sessionToken,
+      modeApplied: selectedMode,
     });
   } catch (error: any) {
     return NextResponse.json(

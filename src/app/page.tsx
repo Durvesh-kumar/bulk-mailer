@@ -1,22 +1,27 @@
+// src/app/page.tsx
 "use client";
 
 import React, { useState, useEffect } from "react";
 import { getClientMachineId } from "@/lib/fingerprint";
+import SuspendedScreen from "@/components/SuspendedScreen";
+import ReferralBanner from "@/components/ReferralBanner";
+import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 
-interface ReportItem {
-  email: string;
-  status: "SUCCESS" | "FAILED";
-  error?: string;
-}
-
-const STORAGE_KEY = "gmail_rotator_campaign";
+const STORAGE_KEY = "inboxsend_queue_session";
 const SESSION_TOKEN_KEY = "reachout_daily_session_token";
-const DEFAULT_BATCH_SIZE = 15;
-const MAX_ALLOWED_BATCH_SIZE = 50;
+const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
-const CHUNK_SIZE = 6;
 
 export default function Home() {
+  // Security & License State
+  const [loadingLicense, setLoadingLicense] = useState(true);
+  const [isSuspended, setIsSuspended] = useState(false);
+  const [userType, setUserType] = useState<"NEW_USER" | "SUSPENDED" | "EXPIRED">("NEW_USER");
+  const [expiryDate, setExpiryDate] = useState("");
+  const [machineId, setMachineId] = useState("");
+  const [appDomain, setAppDomain] = useState("");
+
+  // Campaign Form State
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
@@ -25,59 +30,132 @@ export default function Home() {
   const [subject, setSubject] = useState("");
   const [template, setTemplate] = useState("");
   const [customSignoffName, setCustomSignoffName] = useState("");
+  const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
-  const [allEmails, setAllEmails] = useState<string[]>([]);
-  const [currentIndex, setCurrentIndex] = useState<number>(0);
+  // Queue & Progress State (Supports 1000s of Leads)
+  const [pendingEmails, setPendingEmails] = useState<string[]>([]);
+  const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
+  const [processedCount, setProcessedCount] = useState<number>(0);
+  const [successCount, setSuccessCount] = useState<number>(0);
+  
   const [loading, setLoading] = useState(false);
   const [progressStatus, setProgressStatus] = useState<string>("");
-  const [report, setReport] = useState<ReportItem[]>([]);
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
+  const [lastBatchMessage, setLastBatchMessage] = useState<string>("");
 
+  // 1. License & Device Verification
+  useEffect(() => {
+    async function initSecurityAndLicense() {
+      try {
+        const currentDomain = window.location.hostname;
+        setAppDomain(currentDomain);
+
+        const currentMachineId = await getClientMachineId();
+        setMachineId(currentMachineId);
+
+        const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
+        const res = await fetch("/api/check-license", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            machineId: currentMachineId,
+            domain: currentDomain,
+            sessionToken: savedSession,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || !data.allowed) {
+          setIsSuspended(true);
+          if (data.reason === "EXPIRED") {
+            setUserType("EXPIRED");
+            setExpiryDate(data.expiryDate || "Expired");
+          } else if (data.reason === "SUSPENDED") {
+            setUserType("SUSPENDED");
+          } else {
+            // NEW_DEVICE or Unregistered Domain default
+            setUserType("NEW_USER");
+          }
+        } else {
+          setIsSuspended(false);
+          if (data.sessionToken) {
+            localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          }
+        }
+      } catch {
+        setIsSuspended(true);
+        setUserType("NEW_USER");
+      } finally {
+        setLoadingLicense(false);
+      }
+    }
+
+    initSecurityAndLicense();
+  }, []);
+
+  // 2. Restore Active Campaign State from Local Storage
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        setAllEmails(parsed.allEmails || []);
-        setCurrentIndex(parsed.currentIndex || 0);
-        setReport(parsed.report || []);
-        setSenderName(parsed.senderName || "");
-        setSenderEmail(parsed.senderEmail || "");
-        setSubject(parsed.subject || "website design");
-        setTemplate(parsed.template || "");
-        setCustomSignoffName(parsed.customSignoffName ?? "");
-        setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
-        setIsCampaignStarted(parsed.isCampaignStarted || false);
+        if (parsed.isCampaignStarted && parsed.pendingEmails && parsed.pendingEmails.length > 0) {
+          setPendingEmails(parsed.pendingEmails);
+          setInitialTotalCount(parsed.initialTotalCount || 0);
+          setProcessedCount(parsed.processedCount || 0);
+          setSuccessCount(parsed.successCount || 0);
+          setSenderName(parsed.senderName || "");
+          setSenderEmail(parsed.senderEmail || "");
+          setSubject(parsed.subject || "");
+          setTemplate(parsed.template || "");
+          setCustomSignoffName(parsed.customSignoffName || "");
+          setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
+          setAccountAgeMode(parsed.accountAgeMode || "AGED");
+          setIsCampaignStarted(true);
+          setRawSheetData(parsed.pendingEmails.join("\n"));
+        }
       } catch (e) {
-        console.error("Local state parse error:", e);
+        console.error("Local queue parse error:", e);
       }
     }
   }, []);
 
-  const saveState = (
-    emails: string[],
-    idx: number,
-    rep: ReportItem[],
+  // Save State Helper
+  const saveQueueState = (
+    remainingList: string[],
+    totalInit: number,
+    processed: number,
+    delivered: number,
     name: string,
     fromEmail: string,
     sub: string,
     tmpl: string,
     signName: string,
     bSize: number,
+    mode: AccountAgeMode,
     active: boolean
   ) => {
+    if (remainingList.length === 0) {
+      localStorage.removeItem(STORAGE_KEY);
+      return;
+    }
+
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        allEmails: emails,
-        currentIndex: idx,
-        report: rep,
+        pendingEmails: remainingList,
+        initialTotalCount: totalInit,
+        processedCount: processed,
+        successCount: delivered,
         senderName: name.trim(),
         senderEmail: fromEmail.trim().toLowerCase(),
         subject: sub.trim(),
         template: tmpl.trim(),
         customSignoffName: signName.trim(),
         batchSize: bSize,
+        accountAgeMode: mode,
         isCampaignStarted: active,
       })
     );
@@ -89,16 +167,18 @@ export default function Home() {
       return;
     }
     const num = parseInt(val, 10);
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     if (!isNaN(num)) {
-      setBatchSize(Math.min(num, MAX_ALLOWED_BATCH_SIZE));
+      setBatchSize(Math.min(num, maxLimit));
     }
   };
 
   const handleBatchSizeBlur = () => {
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) {
       setBatchSize(DEFAULT_BATCH_SIZE);
-    } else if (batchSize > MAX_ALLOWED_BATCH_SIZE) {
-      setBatchSize(MAX_ALLOWED_BATCH_SIZE);
+    } else if (batchSize > maxLimit) {
+      setBatchSize(maxLimit);
     }
   };
 
@@ -108,6 +188,7 @@ export default function Home() {
     return Array.from(new Set(matches.map((e) => e.trim().toLowerCase())));
   };
 
+  // Launch Campaign (Unlimited Queue Allowed)
   const handleStartCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
@@ -118,59 +199,76 @@ export default function Home() {
       return;
     }
 
+    const currentModeConfig = MODE_CONFIGS[accountAgeMode];
+    
+    // 🔒 Only clamp batchSize to the mode's maxLot (Queue itself is unlimited)
+    const safeBatchSize = batchSize > 0 
+      ? Math.min(batchSize, currentModeConfig.maxLot) 
+      : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+
     const cleanName = senderName.trim();
     const cleanEmail = senderEmail.trim().toLowerCase();
     const cleanPass = appPassword.replace(/\s+/g, "");
     const cleanSub = subject.trim();
     const cleanTmpl = template.trim();
     const cleanSignName = customSignoffName.trim();
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
 
-    setAllEmails(emails);
-    setCurrentIndex(0);
-    setReport([]);
+    setPendingEmails(emails);
+    setInitialTotalCount(emails.length);
+    setProcessedCount(0);
+    setSuccessCount(0);
     setIsCampaignStarted(true);
+    setLastBatchMessage("");
 
-    saveState(emails, 0, [], cleanName, cleanEmail, cleanSub, cleanTmpl, cleanSignName, safeBatchSize, true);
-    await executeBatch(emails, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl, cleanSignName);
+    saveQueueState(emails, emails.length, 0, 0, cleanName, cleanEmail, cleanSub, cleanTmpl, cleanSignName, safeBatchSize, accountAgeMode, true);
+    await consumeQueueBatch(emails, emails.length, 0, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl, cleanSignName, accountAgeMode);
   };
 
-  const executeBatch = async (
-    emailList: string[],
-    startIdx: number,
+  // Process and Rotate Queue
+  const consumeQueueBatch = async (
+    currentQueue: string[],
+    totalInit: number,
+    currentProcessed: number,
+    currentSuccess: number,
     size: number,
     activeName: string,
     activeEmail: string,
     activePass: string,
     activeSub: string,
     activeTmpl: string,
-    activeSignName: string
+    activeSignName: string,
+    mode: AccountAgeMode
   ) => {
-    const batchToSend = emailList.slice(startIdx, startIdx + size);
-    if (batchToSend.length === 0) {
-      alert("🎉 All leads have been processed successfully!");
+    if (currentQueue.length === 0) {
+      alert("All leads have been processed successfully!");
       return;
     }
 
     if (!activeEmail || !activePass) {
-      alert("Please fill in the Sender Email and App Password for this batch!");
+      alert("Please enter Sender Email and App Password for this batch!");
       return;
     }
 
     setLoading(true);
-    let currentReportState = [...report];
+    setLastBatchMessage("");
     let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-    let processedInThisBatch = 0;
+    
+    const batchToSend = currentQueue.slice(0, size);
+    let workingQueue = [...currentQueue];
+    let updatedProcessed = currentProcessed;
+    let updatedSuccess = currentSuccess;
+
+    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 8;
 
     try {
-      const machineId = getClientMachineId();
+      const currentMachineId = await getClientMachineId();
 
-      for (let i = 0; i < batchToSend.length; i += CHUNK_SIZE) {
-        const chunk = batchToSend.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < batchToSend.length; i += activeChunkSize) {
+        const chunk = batchToSend.slice(i, i + activeChunkSize);
         const startNum = i + 1;
-        const endNum = Math.min(i + CHUNK_SIZE, batchToSend.length);
+        const endNum = Math.min(i + activeChunkSize, batchToSend.length);
 
-        setProgressStatus(`Dispatching batch leads ${startNum} to ${endNum} of ${batchToSend.length}...`);
+        setProgressStatus(`Dispatching batch ${startNum} to ${endNum} of ${batchToSend.length} (${mode} mode)...`);
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -183,12 +281,29 @@ export default function Home() {
             subject: activeSub.trim(),
             template: activeTmpl.trim(),
             customSignoffName: activeSignName.trim(),
-            machineId,
+            accountAgeMode: mode,
+            machineId: currentMachineId,
             sessionToken: latestSessionToken,
           }),
         });
 
         const data = await res.json();
+
+        if (res.status === 403) {
+          setIsSuspended(true);
+          if (data.reason === "EXPIRED") {
+            setUserType("EXPIRED");
+            setExpiryDate(data.expiryDate || "Expired");
+          } else if (data.reason === "SUSPENDED") {
+            setUserType("SUSPENDED");
+          } else {
+            setUserType("NEW_USER");
+          }
+          if (data.clearSession) {
+            localStorage.removeItem(SESSION_TOKEN_KEY);
+          }
+          break;
+        }
 
         if (!res.ok) {
           alert(`Execution Error: ${data.error || "Delivery halted unexpectedly"}`);
@@ -200,144 +315,222 @@ export default function Home() {
           localStorage.setItem(SESSION_TOKEN_KEY, latestSessionToken);
         }
 
-        const chunkResults: ReportItem[] = data.report || [];
-        currentReportState = [...currentReportState, ...chunkResults];
-        processedInThisBatch += chunk.length;
+        const chunkResults: { status: string }[] = data.report || [];
+        const chunkSuccess = chunkResults.filter((r) => r.status === "SUCCESS").length;
+        
+        workingQueue = workingQueue.slice(chunk.length);
+        updatedProcessed += chunk.length;
+        updatedSuccess += chunkSuccess;
 
-        setReport([...currentReportState]);
-        setCurrentIndex(startIdx + processedInThisBatch);
-        saveState(
-          emailList,
-          startIdx + processedInThisBatch,
-          currentReportState,
+        setPendingEmails([...workingQueue]);
+        setProcessedCount(updatedProcessed);
+        setSuccessCount(updatedSuccess);
+
+        saveQueueState(
+          workingQueue,
+          totalInit,
+          updatedProcessed,
+          updatedSuccess,
           activeName,
           activeEmail,
           activeSub,
           activeTmpl,
           activeSignName,
           size,
+          mode,
           true
         );
       }
 
-      const finalIdx = startIdx + processedInThisBatch;
-      if (finalIdx < emailList.length && processedInThisBatch === batchToSend.length) {
-        alert(
-          `✅ Batch completed (${startIdx + 1} to ${finalIdx})!\nYou can now change the Sender Account and App Password for the next batch.`
-        );
+      if (batchToSend.length > 0) {
+        setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched and removed from queue.`);
       }
-    } catch (err) {
-      alert("Failed to connect to the server. Please check your connection!");
+
+      // Automatically clean up when queue is completely empty
+      if (workingQueue.length === 0) {
+        setIsCampaignStarted(false);
+        setRawSheetData("");
+        setSubject("");
+        setTemplate("");
+        setCustomSignoffName("");
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch {
+      alert("Failed to connect to server. Please check your internet connection.");
     } finally {
       setLoading(false);
       setProgressStatus("");
     }
   };
 
+  // Dispatch Next Batch
   const handleNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, MAX_ALLOWED_BATCH_SIZE) : DEFAULT_BATCH_SIZE;
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, maxLimit) : DEFAULT_BATCH_SIZE;
 
-    executeBatch(
-      allEmails,
-      currentIndex,
+    saveQueueState(
+      pendingEmails,
+      initialTotalCount,
+      processedCount,
+      successCount,
+      senderName.trim(),
+      senderEmail.trim().toLowerCase(),
+      subject.trim(),
+      template.trim(),
+      customSignoffName.trim(),
+      safeBatchSize,
+      accountAgeMode,
+      true
+    );
+
+    consumeQueueBatch(
+      pendingEmails,
+      initialTotalCount,
+      processedCount,
+      successCount,
       safeBatchSize,
       senderName.trim(),
       senderEmail.trim().toLowerCase(),
       appPassword.replace(/\s+/g, ""),
       subject.trim(),
       template.trim(),
-      customSignoffName.trim()
+      customSignoffName.trim(),
+      accountAgeMode
     );
   };
 
+  // Reset Everything
   const handleFullReset = () => {
     if (loading) return;
-    if (confirm("Are you sure you want to reset the entire campaign? All progress will be cleared.")) {
+    if (confirm("Are you sure you want to reset the campaign? All active progress and queue will be cleared.")) {
       localStorage.removeItem(STORAGE_KEY);
       setIsCampaignStarted(false);
-      setAllEmails([]);
-      setCurrentIndex(0);
-      setReport([]);
+      setPendingEmails([]);
+      setInitialTotalCount(0);
+      setProcessedCount(0);
+      setSuccessCount(0);
       setRawSheetData("");
       setAppPassword("");
-      setCustomSignoffName("Ruby");
+      setSenderEmail("");
+      setSenderName("");
+      setSubject("");
+      setTemplate("");
+      setCustomSignoffName("");
+      setAccountAgeMode("AGED");
       setBatchSize(DEFAULT_BATCH_SIZE);
       setProgressStatus("");
+      setLastBatchMessage("");
     }
   };
 
-  const totalLeads = allEmails.length;
-  const successCount = report.filter((r) => r.status === "SUCCESS").length;
-  const remainingCount = Math.max(0, totalLeads - currentIndex);
+  if (loadingLicense) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 text-xs font-mono gap-3">
+        <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+        <span className="tracking-wide">Verifying Security Gateway & License...</span>
+      </div>
+    );
+  }
+
+  if (isSuspended) {
+    return (
+      <SuspendedScreen
+        machineId={machineId}
+        appDomain={appDomain}
+        userType={userType}
+        expiryDate={expiryDate}
+        adminPhone="+918266821377"
+        adminEmail="inboxsend.support@gmail.com"
+      />
+    );
+  }
+
+  const remainingCount = pendingEmails.length;
+  const currentMaxLot = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
   const currentBatchTarget = Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 py-10 px-4">
+    <main className="min-h-screen bg-slate-950 text-slate-100 py-8 px-4 selection:bg-indigo-500 selection:text-white">
       <div className="max-w-4xl mx-auto space-y-6">
+
+        <ReferralBanner />
         
-        {/* Header */}
-        <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-xl">
-          <div>
-            <h1 className="text-2xl font-bold bg-linear-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-              ReachOut Multi-Account Rotator
-            </h1>
-            <p className="text-slate-400 text-xs mt-0.5">
-              Direct SMTP Inboxing | Dynamic Human Pacing & Name Customizer
+        {/* Main Header */}
+        <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-2xl relative overflow-hidden">
+          <div className="space-y-1 z-10">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
+              <h1 className="text-2xl font-black bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent tracking-tight">
+                InboxSend Multi-Account Rotator
+              </h1>
+            </div>
+            <p className="text-slate-400 text-xs font-medium">
+              Enterprise Multi-Channel Delivery Engine | Dynamic Queue Consumption & High-Priority Inbox Placement
             </p>
           </div>
+
           <button
             type="button"
             disabled={loading}
             onClick={handleFullReset}
-            className="px-4 py-2 bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-500/30 rounded-xl text-xs font-semibold transition disabled:opacity-40 cursor-pointer"
+            className="z-10 px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold transition duration-200 disabled:opacity-40 cursor-pointer shadow-sm active:scale-95 flex items-center gap-1.5"
           >
-            🔄 Reset Campaign
+            <span>🔄</span> Reset Campaign
           </button>
         </div>
 
         {/* Realtime Statistics */}
-        <div className="grid grid-cols-4 gap-3">
-          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-            <p className="text-[10px] text-slate-400 uppercase font-semibold">Total Leads</p>
-            <p className="text-xl font-bold mt-1 text-slate-100">{totalLeads}</p>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-slate-800/80 shadow-lg">
+            <p className="text-[10px] text-slate-400 uppercase font-black tracking-wider">Total Leads</p>
+            <p className="text-2xl font-black mt-1 text-slate-100 font-mono">{initialTotalCount}</p>
           </div>
-          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-            <p className="text-[10px] text-indigo-400 uppercase font-semibold">Processed</p>
-            <p className="text-xl font-bold text-indigo-400 mt-1">{currentIndex}</p>
+          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-indigo-500/20 shadow-lg">
+            <p className="text-[10px] text-indigo-400 uppercase font-black tracking-wider">Processed</p>
+            <p className="text-2xl font-black text-indigo-400 mt-1 font-mono">{processedCount}</p>
           </div>
-          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-            <p className="text-[10px] text-emerald-400 uppercase font-semibold">Delivered</p>
-            <p className="text-xl font-bold text-emerald-400 mt-1">{successCount}</p>
+          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-emerald-500/20 shadow-lg">
+            <p className="text-[10px] text-emerald-400 uppercase font-black tracking-wider">Delivered</p>
+            <p className="text-2xl font-black text-emerald-400 mt-1 font-mono">{successCount}</p>
           </div>
-          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800">
-            <p className="text-[10px] text-amber-400 uppercase font-semibold">Remaining</p>
-            <p className="text-xl font-bold text-amber-400 mt-1">{remainingCount}</p>
+          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-amber-500/20 shadow-lg">
+            <p className="text-[10px] text-amber-400 uppercase font-black tracking-wider">In Queue</p>
+            <p className="text-2xl font-black text-amber-400 mt-1 font-mono">{remainingCount}</p>
           </div>
         </div>
 
-        {/* Progress Notification */}
+        {/* Progress Alert */}
         {loading && (
-          <div className="bg-blue-500/10 border border-blue-500/30 p-4 rounded-xl flex items-center gap-3">
-            <div className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-xs font-mono text-blue-300 font-semibold">{progressStatus}</p>
+          <div className="bg-indigo-950/40 border border-indigo-500/30 p-4 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
+            <div className="w-5 h-5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+            <p className="text-xs font-mono text-indigo-300 font-bold">{progressStatus}</p>
+          </div>
+        )}
+
+        {lastBatchMessage && !loading && (
+          <div className="bg-emerald-950/30 border border-emerald-500/30 p-4 rounded-2xl flex items-center justify-between text-xs text-emerald-300 font-medium">
+            <span>{lastBatchMessage}</span>
+            <button onClick={() => setLastBatchMessage("")} className="text-slate-400 hover:text-white text-xs">✕</button>
           </div>
         )}
 
         {/* STEP 1: INITIAL CAMPAIGN SETUP */}
         {!isCampaignStarted ? (
-          <form onSubmit={handleStartCampaign} className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-5 shadow-xl">
-            <div className="border-b border-slate-800 pb-2">
-              <h2 className="text-sm font-semibold text-blue-400 uppercase tracking-wider">
-                Step 1: Setup Campaign & Batch 1
+          <form onSubmit={handleStartCampaign} className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-6 sm:p-7 rounded-3xl space-y-5 shadow-2xl">
+            <div className="border-b border-slate-800 pb-3 flex items-center justify-between">
+              <h2 className="text-xs font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-indigo-400" />
+                Step 1: Setup Campaign & Target Queue
               </h2>
+              <span className="text-[11px] text-slate-500 font-mono">Zero-Duplicate Engine</span>
             </div>
 
-            {/* Row 1: Gmail Account Credentials */}
+            {/* Row 1: Credentials */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Gmail ID (Auto-trimmed)</label>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Google Account ID</label>
                 <input
                   type="email"
                   required
@@ -346,11 +539,11 @@ export default function Home() {
                   onChange={(e) => setSenderEmail(e.target.value)}
                   onBlur={(e) => setSenderEmail(e.target.value.trim().toLowerCase())}
                   placeholder="account1@gmail.com"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none overflow-hidden"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Gmail App Password (16-digits)</label>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5">App Password (16-digits)</label>
                 <input
                   type="password"
                   required
@@ -359,31 +552,55 @@ export default function Home() {
                   onChange={(e) => setAppPassword(e.target.value)}
                   onBlur={(e) => setAppPassword(e.target.value.replace(/\s+/g, ""))}
                   placeholder="xxxx xxxx xxxx xxxx"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-amber-300 font-mono focus:border-blue-500 outline-none overflow-hidden"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-amber-300 font-mono focus:border-indigo-500 outline-none transition"
                 />
               </div>
             </div>
 
-            {/* Row 2: Target Leads (Left) + Sender Name & Batch Size (Right Side) */}
+            {/* Row 2: Leads (Left) + Mode, Display Name & Batch Size (Right) */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Left Column: Target Leads */}
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Target Leads (Paste Sheet List)</label>
+                <label className="block text-xs font-bold text-slate-300 mb-1.5">Target Leads (Paste Sheet Column - Unlimited)</label>
                 <textarea
-                  rows={7}
+                  rows={9}
                   required
                   disabled={loading}
                   value={rawSheetData}
                   onChange={(e) => setRawSheetData(e.target.value)}
                   placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-blue-500 outline-none resize-none"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
                 />
               </div>
 
-              {/* Right Column: Stacked Controls (Sender Header Name & Batch Size) */}
-              <div className="space-y-3 flex flex-col justify-center">
+              <div className="space-y-3.5 flex flex-col justify-between">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name (From Display)</label>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-bold text-indigo-300">Account Trust / Age Mode</label>
+                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+                      {MODE_CONFIGS[accountAgeMode]?.badge}
+                    </span>
+                  </div>
+                  <select
+                    disabled={loading}
+                    value={accountAgeMode}
+                    onChange={(e) => {
+                      const newMode = e.target.value as AccountAgeMode;
+                      setAccountAgeMode(newMode);
+                      const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
+                      if (batchSize > maxLimit) {
+                        setBatchSize(maxLimit);
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 focus:border-indigo-500 outline-none transition cursor-pointer"
+                  >
+                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads / Batch (8/Chunk)</option>
+                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads / Batch (6/Chunk)</option>
+                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads / Batch (4/Chunk)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Header Display Name</label>
                   <input
                     type="text"
                     required
@@ -391,34 +608,35 @@ export default function Home() {
                     value={senderName}
                     onChange={(e) => setSenderName(e.target.value)}
                     onBlur={(e) => setSenderName(e.target.value.trim())}
-                    placeholder="e.g. Ruby"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none overflow-hidden"
+                    placeholder="e.g. Sales Team / Your Name"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
-                    Batch Size (Max {MAX_ALLOWED_BATCH_SIZE})
-                  </label>
+                  <div className="flex justify-between items-center mb-1.5">
+                    <label className="block text-xs font-bold text-slate-300">Batch Size</label>
+                    <span className="text-[10px] text-slate-400 font-mono">Max: {currentMaxLot}</span>
+                  </div>
                   <input
                     type="number"
                     min={MIN_ALLOWED_BATCH_SIZE}
-                    max={MAX_ALLOWED_BATCH_SIZE}
+                    max={currentMaxLot}
                     required
                     disabled={loading}
                     value={batchSize || ""}
                     onChange={(e) => handleBatchSizeChange(e.target.value)}
                     onBlur={handleBatchSizeBlur}
                     placeholder={String(DEFAULT_BATCH_SIZE)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-blue-400 font-bold focus:border-blue-500 outline-none overflow-hidden [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-indigo-400 font-black focus:border-indigo-500 outline-none transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Row 3: Subject Line (Full Width Single Row) */}
+            {/* Row 3: Subject */}
             <div className="w-full">
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line</label>
+              <label className="block text-xs font-bold text-slate-300 mb-1.5">Subject Line</label>
               <input
                 type="text"
                 required
@@ -426,29 +644,29 @@ export default function Home() {
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 onBlur={(e) => setSubject(e.target.value.trim())}
-                placeholder="e.g. website design"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-blue-500 outline-none overflow-hidden"
+                placeholder="e.g. Quick question regarding project inquiry"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
               />
             </div>
 
-            {/* Row 4: Message Body (Full Width Single Row) */}
+            {/* Row 4: Message Body */}
             <div className="w-full">
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body</label>
+              <label className="block text-xs font-bold text-slate-300 mb-1.5">Email Body Template</label>
               <textarea
                 rows={6}
                 required
                 disabled={loading}
                 value={template}
                 onChange={(e) => setTemplate(e.target.value)}
-                placeholder="Type your core pitch here..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-sm text-slate-100 focus:border-blue-500 outline-none leading-relaxed resize-none"
+                placeholder="Type your outreach message here..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-sm text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none transition"
               />
             </div>
 
-            {/* Row 5: Sign-off Bottom Name (Full Width Single Row) */}
-            <div className="w-full">
-              <label className="block text-xs font-semibold text-emerald-400 mb-1">
-                Sign-off Bottom Name (e.g. Ruby, Neelam, Babu)
+            {/* Row 5: Custom Signoff / Footer Block */}
+            <div className="w-full bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80">
+              <label className="block text-xs font-bold text-emerald-400 mb-1.5">
+                Custom Footer & Signature Details (Name, Company, Brand)
               </label>
               <input
                 type="text"
@@ -456,18 +674,18 @@ export default function Home() {
                 value={customSignoffName}
                 onChange={(e) => setCustomSignoffName(e.target.value)}
                 onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
-                placeholder="e.g. Ruby"
-                className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-semibold overflow-hidden"
+                placeholder="e.g. John Doe | Founder at Acme Corp"
+                className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-bold transition"
               />
-              <p className="text-[11px] text-slate-400 mt-1">
-                💡 "Best regards,", "Thanks & regards,", etc. will auto-rotate with a clean 1-line space before this name.
+              <p className="text-[11px] text-slate-400 mt-1.5">
+                Leave empty to fallback automatically to Sender Display Name.
               </p>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer"
+              className="w-full py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-2xl text-sm transition shadow-xl disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
             >
               {loading ? (
                 <>
@@ -475,26 +693,51 @@ export default function Home() {
                   <span>Dispatching Batch 1...</span>
                 </>
               ) : (
-                `🚀 Start Campaign & Send First ${batchSize || DEFAULT_BATCH_SIZE} Leads`
+                `🚀 Launch Campaign & Send Batch 1 (${Math.min(batchSize || DEFAULT_BATCH_SIZE, currentMaxLot)} Leads)`
               )}
             </button>
           </form>
         ) : (
           /* STEP 2: BATCH ROTATION DASHBOARD */
-          <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl space-y-4 shadow-xl">
+          <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-6 sm:p-7 rounded-3xl space-y-5 shadow-2xl">
             {remainingCount > 0 ? (
-              <form onSubmit={handleNextBatch} className="space-y-4 bg-slate-950/70 border border-slate-800 p-5 rounded-xl">
-                <div className="border-b border-slate-800 pb-2 flex justify-between items-center">
-                  <h3 className="text-sm font-bold text-blue-400">
-                    Next Batch: Leads #{currentIndex + 1} to #{currentIndex + currentBatchTarget}
+              <form onSubmit={handleNextBatch} className="space-y-4 bg-slate-950/80 border border-slate-800/90 p-5 rounded-2xl">
+                <div className="border-b border-slate-800 pb-3 flex justify-between items-center">
+                  <h3 className="text-sm font-black text-indigo-400 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
+                    Next Batch: {currentBatchTarget} Pending Leads Ready
                   </h3>
-                  <span className="text-xs text-amber-400 font-mono">Remaining: {remainingCount}</span>
+                  <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-1 rounded-full border border-amber-500/20">
+                    Remaining in Queue: {remainingCount}
+                  </span>
+                </div>
+
+                {/* Mode Selector */}
+                <div>
+                  <label className="block text-xs font-bold text-indigo-300 mb-1.5">Account Trust / Age Mode</label>
+                  <select
+                    disabled={loading}
+                    value={accountAgeMode}
+                    onChange={(e) => {
+                      const newMode = e.target.value as AccountAgeMode;
+                      setAccountAgeMode(newMode);
+                      const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
+                      if (batchSize > maxLimit) {
+                        setBatchSize(maxLimit);
+                      }
+                    }}
+                    className="w-full bg-slate-900 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads / Batch (8/Chunk)</option>
+                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads / Batch (6/Chunk)</option>
+                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads / Batch (4/Chunk)</option>
+                  </select>
                 </div>
 
                 {/* Account Switch Inputs */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">New Sender Gmail ID (Change Account)</label>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">New Sender Account (Rotate Now)</label>
                     <input
                       type="email"
                       required
@@ -503,11 +746,11 @@ export default function Home() {
                       onChange={(e) => setSenderEmail(e.target.value)}
                       onBlur={(e) => setSenderEmail(e.target.value.trim().toLowerCase())}
                       placeholder="account2@gmail.com"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none overflow-hidden"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">New App Password (Change Account)</label>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">New App Password (Rotate Now)</label>
                     <input
                       type="password"
                       required
@@ -516,15 +759,15 @@ export default function Home() {
                       onChange={(e) => setAppPassword(e.target.value)}
                       onBlur={(e) => setAppPassword(e.target.value.replace(/\s+/g, ""))}
                       placeholder="xxxx xxxx xxxx xxxx"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-amber-300 font-mono outline-none overflow-hidden"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-amber-300 font-mono outline-none focus:border-indigo-500"
                     />
                   </div>
                 </div>
 
-                {/* Batch Config Controls (2 Columns) */}
+                {/* Batch Config Controls */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Sender Header Name</label>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Display Name</label>
                     <input
                       type="text"
                       required
@@ -532,28 +775,29 @@ export default function Home() {
                       value={senderName}
                       onChange={(e) => setSenderName(e.target.value)}
                       onBlur={(e) => setSenderName(e.target.value.trim())}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none overflow-hidden"
+                      placeholder="e.g. Sales Lead / Support"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Batch Size</label>
+                    <label className="block text-xs font-bold text-slate-300 mb-1.5">Batch Size</label>
                     <input
                       type="number"
                       min={MIN_ALLOWED_BATCH_SIZE}
-                      max={MAX_ALLOWED_BATCH_SIZE}
+                      max={currentMaxLot}
                       required
                       disabled={loading}
                       value={batchSize || ""}
                       onChange={(e) => handleBatchSizeChange(e.target.value)}
                       onBlur={handleBatchSizeBlur}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-blue-400 font-bold outline-none overflow-hidden [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-indigo-400 font-bold outline-none focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
                   </div>
                 </div>
 
-                {/* Subject Line (Full Row) */}
+                {/* Subject Line */}
                 <div className="w-full">
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Subject Line (Full Row)</label>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">Subject Line</label>
                   <input
                     type="text"
                     required
@@ -561,40 +805,42 @@ export default function Home() {
                     value={subject}
                     onChange={(e) => setSubject(e.target.value)}
                     onBlur={(e) => setSubject(e.target.value.trim())}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none overflow-hidden"
+                    placeholder="e.g. Quick question regarding partnership / inquiry"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
                   />
                 </div>
 
-                {/* Message Body (Full Row) */}
+                {/* Message Body */}
                 <div className="w-full">
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Message Body (Full Row)</label>
+                  <label className="block text-xs font-bold text-slate-300 mb-1.5">Message Body</label>
                   <textarea
                     rows={4}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3.5 text-sm text-slate-100 outline-none leading-relaxed resize-none"
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-4 text-sm text-slate-100 outline-none leading-relaxed resize-none focus:border-indigo-500"
                   />
                 </div>
 
-                {/* Sign-off Bottom Name (Full Row) */}
+                {/* Sign-off Footer / Signature */}
                 <div className="w-full">
-                  <label className="block text-xs font-semibold text-emerald-400 mb-1">Sign-off Bottom Name (Editable)</label>
+                  <label className="block text-xs font-bold text-emerald-400 mb-1.5">Custom Footer & Signature Details (Name, Company, Brand)</label>
                   <input
                     type="text"
                     disabled={loading}
                     value={customSignoffName}
                     onChange={(e) => setCustomSignoffName(e.target.value)}
                     onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
-                    className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-3.5 py-2 text-sm text-slate-100 outline-none font-semibold overflow-hidden"
+                    placeholder="e.g. John Doe | Founder at Acme Corp"
+                    className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-4 py-2 text-sm text-slate-100 outline-none font-semibold focus:border-emerald-500"
                   />
                 </div>
 
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm transition shadow-lg disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer"
+                  className="w-full py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-2xl text-sm transition-all duration-300 shadow-xl hover:shadow-indigo-500/25 disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
                 >
                   {loading ? (
                     <>
@@ -607,35 +853,10 @@ export default function Home() {
                 </button>
               </form>
             ) : (
-              <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-xl font-semibold text-sm">
-                🎉 All {allEmails.length} leads have been processed successfully!
+              <div className="p-6 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-2xl font-bold text-sm shadow-inner flex items-center justify-center gap-2">
+                <span>🎉</span> All {initialTotalCount} leads have been processed, delivered, and cleared from the queue!
               </div>
             )}
-          </div>
-        )}
-
-        {/* Live Audit Log */}
-        {report.length > 0 && (
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
-            <h2 className="text-sm font-bold text-slate-300 mb-3 uppercase tracking-wider">
-              Live Delivery Audit ({report.length} Processed)
-            </h2>
-            <div className="divide-y divide-slate-800 max-h-60 overflow-y-auto pr-1">
-              {report.map((r, i) => (
-                <div key={i} className="py-2.5 flex items-center justify-between text-xs font-mono">
-                  <span className="text-slate-300">{r.email}</span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full ${
-                      r.status === "SUCCESS"
-                        ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                        : "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                    }`}
-                  >
-                    {r.status} {r.error ? `• ${r.error}` : ""}
-                  </span>
-                </div>
-              ))}
-            </div>
           </div>
         )}
 

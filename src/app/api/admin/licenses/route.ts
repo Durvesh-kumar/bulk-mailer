@@ -1,16 +1,23 @@
+// src/app/api/admin/licenses/route.ts
 import { NextResponse } from "next/server";
 import { connectToDatabase } from "@/lib/db";
 import { LicenseModel } from "@/lib/models/License";
+import { cleanAppDomain } from "@/lib/licenseGuard";
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
-// URL से शुद्ध होस्टनेम निकालने वाला हेल्पर
-function cleanInputDomain(raw: string): string {
-  if (!raw) return "localhost";
-  let cleaned = raw.trim().toLowerCase();
-  cleaned = cleaned.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
-  cleaned = cleaned.split("/")[0].split(":")[0].trim();
-  return cleaned || "localhost";
+// 📅 शुद्ध कैलेंडर मंथ/ईयर जोड़ने वाला फंक्शन
+function addMonthsToDate(fromDate: Date, monthsToAdd: number): Date {
+  const date = new Date(fromDate);
+  const originalDay = date.getDate();
+  
+  date.setMonth(date.getMonth() + monthsToAdd);
+  
+  // महीने के अंत का ओवरफ्लो प्रिवेंशन (जैसे 31 तारीख वाले महीने)
+  if (date.getDate() < originalDay) {
+    date.setDate(0);
+  }
+  return date;
 }
 
 export async function GET(req: Request) {
@@ -22,9 +29,9 @@ export async function GET(req: Request) {
 
     await connectToDatabase();
     const licenses = await LicenseModel.find({}).sort({ createdAt: -1 }).lean();
-    return NextResponse.json({ licenses: licenses || [] });
+    return NextResponse.json({ success: true, licenses: licenses || [] });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Server Error" }, { status: 500 });
+    return NextResponse.json({ success: false, error: error.message || "Server Error" }, { status: 500 });
   }
 }
 
@@ -39,11 +46,17 @@ export async function POST(req: Request) {
 
     const body = await req.json();
     const action = body.action || "CREATE_APP_DOMAIN";
-    const rawDomain = body.appDomain || "";
-    const targetDomain = cleanInputDomain(rawDomain);
-    const clientName = (body.clientName || "Babu Dev").trim();
+    const targetDomain = cleanAppDomain(body.appDomain || "");
+    const clientName = (body.clientName || "Client").trim();
+    
+    // अगर मंथ्स भेजे हैं तो मंथ्स, नहीं तो इयर्स को 12 से गुणा करके मंथ्स बनाएँ
+    const monthsToAdd = body.validityMonths ? Number(body.validityMonths) : (Number(body.validityYears || 1) * 12);
 
-    // 1. CREATE ACTION (Whitelist App Domain)
+    if (!targetDomain) {
+      return NextResponse.json({ error: "App Domain is required" }, { status: 400 });
+    }
+
+    // 1️⃣ CREATE ACTION
     if (action === "CREATE_APP_DOMAIN" || action === "CREATE_LICENSE") {
       const existing = await LicenseModel.findOne({ appDomain: targetDomain });
 
@@ -54,8 +67,7 @@ export async function POST(req: Request) {
         );
       }
 
-      const expiry = new Date();
-      expiry.setDate(expiry.getDate() + 365);
+      const expiry = addMonthsToDate(new Date(), monthsToAdd);
 
       const newLicense = await LicenseModel.create({
         clientName: clientName,
@@ -66,69 +78,67 @@ export async function POST(req: Request) {
       });
 
       return NextResponse.json({
-        message: `App Domain (${targetDomain}) successfully whitelisted for 1 year!`,
+        success: true,
+        message: `Domain (${targetDomain}) whitelisted until ${expiry.toLocaleDateString("en-GB")}!`,
         license: newLicense,
       });
     }
 
-    // 2. RENEW ACTION (+365 Days)
+    // 2️⃣ RENEW ACTION (Month या Year दोनों के लिए)
     if (action === "RENEW_SUBSCRIPTION") {
       const lic = await LicenseModel.findOne({ appDomain: targetDomain });
+      if (!lic) return NextResponse.json({ error: `Domain not found.` }, { status: 404 });
 
-      if (!lic) {
-        return NextResponse.json({ error: `App Domain (${targetDomain}) not found.` }, { status: 404 });
-      }
+      // अगर पहले से एक्सपायर है तो आज से जोड़ें, वरना मौजूदा एक्सपायरी से आगे बढ़ाएँ
+      const baseDate = lic.expiresAt && new Date(lic.expiresAt) > new Date()
+        ? new Date(lic.expiresAt)
+        : new Date();
 
-      const baseDate =
-        lic.expiresAt && new Date(lic.expiresAt) > new Date()
-          ? new Date(lic.expiresAt)
-          : new Date();
-
-      baseDate.setDate(baseDate.getDate() + 365);
-      lic.expiresAt = baseDate;
+      const newExpiry = addMonthsToDate(baseDate, monthsToAdd);
+      lic.expiresAt = newExpiry;
       lic.status = "ACTIVE";
       await lic.save();
 
+      const periodLabel = monthsToAdd === 12 ? "1 Year" : `${monthsToAdd} Month(s)`;
+
       return NextResponse.json({
-        message: `Plan renewed! ${targetDomain} extended to ${baseDate.toLocaleDateString()}.`,
+        success: true,
+        message: `Plan renewed (+${periodLabel})! Extended until ${newExpiry.toLocaleDateString("en-GB")}.`,
       });
     }
 
-    // 3. RESET DEVICE LOCK
+    // 3️⃣ RESET DEVICE LOCK
     if (action === "RESET_DEVICE") {
       const lic = await LicenseModel.findOne({ appDomain: targetDomain });
-
-      if (!lic) {
-        return NextResponse.json({ error: `App Domain (${targetDomain}) not found.` }, { status: 404 });
-      }
+      if (!lic) return NextResponse.json({ error: `Domain not found.` }, { status: 404 });
 
       lic.lockedDeviceId = null;
       lic.lastResetAt = new Date();
       await lic.save();
 
       return NextResponse.json({
+        success: true,
         message: `Device lock cleared for ${targetDomain}! Ready for new machine binding.`,
       });
     }
 
-    // 4. TOGGLE STATUS (Active / Suspended)
+    // 4️⃣ TOGGLE STATUS (Active / Suspended)
     if (action === "TOGGLE_STATUS") {
       const lic = await LicenseModel.findOne({ appDomain: targetDomain });
-
-      if (!lic) {
-        return NextResponse.json({ error: `App Domain (${targetDomain}) not found.` }, { status: 404 });
-      }
+      if (!lic) return NextResponse.json({ error: `Domain not found.` }, { status: 404 });
 
       lic.status = lic.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE";
+      lic.lastResetAt = new Date();
       await lic.save();
 
       return NextResponse.json({
+        success: true,
         message: `Status of ${targetDomain} changed to ${lic.status}`,
       });
     }
 
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 });
+    return NextResponse.json({ success: false, error: error.message || "Internal Server Error" }, { status: 500 });
   }
 }
