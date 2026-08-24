@@ -1,18 +1,74 @@
+// src/components/modals/SpintaxPreviewModal.tsx
 "use client";
 
 import React, { useState } from "react";
+import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
-  samples: { subject: string; body: string }[];
-  onReRoll: () => void;
+  template: string;
+  subject: string;
+  senderName: string;
+  customSignoffName: string;
 }
 
-export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll }: Props) {
+export default function SpintaxPreviewModal({
+  isOpen,
+  onClose,
+  template,
+  subject,
+  senderName,
+  customSignoffName,
+}: Props) {
   const [activeTab, setActiveTab] = useState(0);
 
   if (!isOpen) return null;
+
+  const pickRandom = (arr: string[]): string => arr[Math.floor(Math.random() * arr.length)];
+
+  // 🎲 स्पिंटैक्स और ctaConfig से ग्रीटिंग/ओपनर/साइनऑफ लेकर प्रीव्यू जनरेट करना
+  const generateSamples = () => {
+    const cleanHeaderName = (senderName || "Team").trim();
+    const finalSignoffName =
+      customSignoffName && customSignoffName.trim().length > 0
+        ? customSignoffName.trim()
+        : cleanHeaderName;
+
+    const resolveSpintax = (text: string) => {
+      let resolved = text || "";
+      const regex = /\{([^{}]+)\}/g;
+      while (regex.test(resolved)) {
+        resolved = resolved.replace(regex, (_, match) => {
+          const choices = match.split("|");
+          return choices[Math.floor(Math.random() * choices.length)];
+        });
+      }
+      return resolved;
+    };
+
+    const samples = [];
+    for (let i = 0; i < 4; i++) {
+      const randomGreeting = pickRandom(GREETINGS);
+      const randomOpener = pickRandom(OPENERS);
+      const randomSignOff = pickRandom(SIGN_OFFS);
+
+      const resolvedBody = resolveSpintax(template);
+      const resolvedSubject = resolveSpintax(subject) || "(No Subject)";
+      
+      // 📝 यह ठीक वही फॉर्मेट है जो बैकएंड में मेल के साथ जुड़कर जाता है
+      const sampleBody = `${randomGreeting}\n\n${randomOpener}\n\n${resolvedBody || "(Your message body will appear here)"}\n\n${randomSignOff}\n\n${finalSignoffName}`;
+      
+      samples.push({ subject: resolvedSubject, body: sampleBody });
+    }
+    return samples;
+  };
+
+  const [samples, setSamples] = useState(generateSamples());
+
+  const handleReRoll = () => {
+    setSamples(generateSamples());
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md transition-all animate-fadeIn">
@@ -26,10 +82,10 @@ export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll
             </div>
             <div>
               <h3 className="text-sm font-bold text-white tracking-wide">
-                Spintax Live Variation Inspector
+                Spintax & Template Preview Inspector
               </h3>
               <p className="text-[11px] text-slate-400">
-                Simulating dynamic body & subject mutations for inbox diversity
+                Simulating exact layout with Greetings, Openers & Sign-offs from ctaConfig
               </p>
             </div>
           </div>
@@ -60,7 +116,7 @@ export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll
           </div>
 
           <button
-            onClick={onReRoll}
+            onClick={handleReRoll}
             className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition shadow-lg flex items-center gap-1.5 cursor-pointer active:scale-95"
           >
             <span>🔄</span> Re-Roll Variations
@@ -71,7 +127,6 @@ export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll
         <div className="p-5 overflow-y-auto max-h-[55vh] space-y-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-slate-800 [&::-webkit-scrollbar-thumb]:rounded-full">
           {samples[activeTab] ? (
             <div className="space-y-3.5 animate-fadeIn">
-              {/* Subject Box */}
               <div>
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
                   Resolved Subject Line
@@ -82,10 +137,9 @@ export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll
                 </div>
               </div>
 
-              {/* Body Box */}
               <div>
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                  Resolved Email Body (As Received by Lead)
+                  Resolved Email Body (As Received by Lead with ctaConfig)
                 </label>
                 <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 whitespace-pre-wrap leading-relaxed shadow-inner min-h-[140px] font-sans">
                   {samples[activeTab].body || "(No Body Content Provided)"}
@@ -94,7 +148,7 @@ export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll
             </div>
           ) : (
             <div className="py-12 text-center text-slate-500 text-xs">
-              No spintax variations generated. Click Re-Roll above.
+              No variations generated. Click Re-Roll above.
             </div>
           )}
         </div>
@@ -102,7 +156,7 @@ export default function SpintaxPreviewModal({ isOpen, onClose, samples, onReRoll
         {/* Footer */}
         <div className="px-5 py-3 border-t border-slate-800/80 bg-slate-950/40 flex items-center justify-between">
           <span className="text-[11px] text-emerald-400 font-sans flex items-center gap-1">
-            <span>✨</span> 100% Unique Fingerprint per Recipient
+            <span>✨</span> 100% Synced with Backend ctaConfig Layout
           </span>
           <button
             onClick={onClose}

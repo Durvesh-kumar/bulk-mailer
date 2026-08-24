@@ -1,17 +1,17 @@
 // src/app/page.tsx
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { getClientMachineId } from "@/lib/fingerprint";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import ReferralBanner from "@/components/ReferralBanner";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 
-// 🚀 Smart Modules & Modals Integration
+// 🚀 Smart Modules & Modals Integration (फालतू generateFrontendPreviewVariation इम्पोर्ट यहाँ से हटा दिया गया है)
 import RejectedLeadsModal from "@/components/modals/RejectedLeadsModal";
 import SpintaxPreviewModal from "@/components/modals/SpintaxPreviewModal";
-import { cleanAndFilterLeads, generateBackendMatchedVariation, RejectedEmailItem } from "@/lib/leadCleaner";
+import { cleanAndFilterLeads, RejectedEmailItem } from "@/lib/leadCleaner";
 
 export type ProfileTier = "CURRENT" | "YEAR_1" | "YEAR_2" | "YEAR_4" | "YEAR_6";
 
@@ -45,7 +45,6 @@ const TIER_META: Record<ProfileTier, { label: string; badge: string; modeMap: Ac
 };
 
 export default function Home() {
-  // Security & License State
   const [loadingLicense, setLoadingLicense] = useState(true);
   const [isSuspended, setIsSuspended] = useState(false);
   const [userType, setUserType] = useState<"NEW_USER" | "SUSPENDED" | "EXPIRED">("NEW_USER");
@@ -53,22 +52,18 @@ export default function Home() {
   const [machineId, setMachineId] = useState("");
   const [appDomain, setAppDomain] = useState("");
 
-  // 🎯 Selected Age Profile Tier
   const [selectedTier, setSelectedTier] = useState<ProfileTier>("YEAR_2");
   const [isVaultLoaded, setIsVaultLoaded] = useState(false);
 
-  // Active Sender State (Visible & Live in UI)
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  // Senders Account Rotation Stats
   const [inMemorySenders, setInMemorySenders] = useState<SmtpAccount[]>([]);
   const [currentSenderIndex, setCurrentSenderIndex] = useState<number>(0);
   const [sendersUsedRounds, setSendersUsedRounds] = useState<number>(0);
 
-  // Campaign Form State
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
   const [subject, setSubject] = useState("");
@@ -76,11 +71,11 @@ export default function Home() {
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
-  // 🎛️ Template & Subject Rotation Control State
   const [rotationMode, setRotationMode] = useState<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
   const [pauseAfterNSenders, setPauseAfterNSenders] = useState<number>(2);
 
-  // Leads Queue & Progress State
+  const isStopRequestedRef = useRef(false);
+
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
@@ -91,21 +86,16 @@ export default function Home() {
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
   const [lastBatchMessage, setLastBatchMessage] = useState<string>("");
 
-  // 🛡️ Rejected Leads Auditor
   const [showRejectedModal, setShowRejectedModal] = useState(false);
   const [rejectedData, setRejectedData] = useState<RejectedEmailItem[]>([]);
   const [rejectedStats, setRejectedStats] = useState({ total: 0, dups: 0, syntax: 0, temp: 0 });
 
-  // 🔴 Delivery Failed Leads Tracker & Copy Feedback State
   const [failedLeadsList, setFailedLeadsList] = useState<FailedEmailItem[]>([]);
   const [showFailedModal, setShowFailedModal] = useState(false);
   const [copiedType, setCopiedType] = useState<"DETAILED" | "EMAILS" | null>(null);
 
-  // 🎲 Spintax Preview
   const [showPreviewModal, setShowPreviewModal] = useState(false);
-  const [previewSamples, setPreviewSamples] = useState<{ subject: string; body: string }[]>([]);
 
-  // 1. License Check & Dual Queue Autosave Restorer (Leads + Senders)
   useEffect(() => {
     async function initSecurityAndLicense() {
       try {
@@ -134,7 +124,6 @@ export default function Home() {
           setIsSuspended(false);
           if (data.sessionToken) localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
 
-          // 💾 1. Auto-Restore Pending Leads Queue
           try {
             const savedQueue = localStorage.getItem(PENDING_QUEUE_STORAGE_KEY);
             if (savedQueue) {
@@ -151,7 +140,6 @@ export default function Home() {
             console.error("Queue restore error:", e);
           }
 
-          // 💾 2. Auto-Restore Active Senders Queue State
           try {
             const savedSendersState = localStorage.getItem(SENDERS_QUEUE_STORAGE_KEY);
             if (savedSendersState) {
@@ -190,7 +178,6 @@ export default function Home() {
     initSecurityAndLicense();
   }, []);
 
-  // 2. 🎯 STRICT SINGLE-TIER REPLACEMENT: क्लिक होते ही पुराना सेंडर डेटा डंप और नया टियर लोड
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
     setLoading(true);
@@ -209,7 +196,6 @@ export default function Home() {
 
       const data = await res.json();
       if (data.accounts && data.accounts.length > 0) {
-        // ⚡ केवल इसी टियर के अकाउंट्स स्टोर होंगे, पिछला सारा सेंडर डेटा बाहर
         const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
         
         if (currentTierOnly.length > 0) {
@@ -224,7 +210,6 @@ export default function Home() {
           setIsVaultLoaded(true);
           setLastBatchMessage(`⚡ Loaded ${currentTierOnly.length} account(s) for ${TIER_META[tier].label}`);
 
-          // LocalStorage में भी केवल यही नया टियर रहेगा, पिछला डेटा ओवरराइट हो जाएगा
           localStorage.setItem(
             SENDERS_QUEUE_STORAGE_KEY,
             JSON.stringify({ senders: currentTierOnly, currentIndex: 0, rounds: 0 })
@@ -264,7 +249,6 @@ export default function Home() {
     }
   };
 
-  // 🧹 1. Smart Clean Action
   const handleAutoCleanLeads = () => {
     if (!rawSheetData.trim()) {
       alert("⚠️ Please paste your email leads list in the box first to clean!");
@@ -290,19 +274,6 @@ export default function Home() {
     }
   };
 
-  // 🎲 2. Generate 4 Live Spintax Samples
-  const handleGenerateSpintaxPreviews = () => {
-    const samples = [];
-    for (let i = 0; i < 4; i++) {
-      samples.push(
-        generateBackendMatchedVariation(template, subject, senderName || "Team", customSignoffName)
-      );
-    }
-    setPreviewSamples(samples);
-    setShowPreviewModal(true);
-  };
-
-  // 📋 3. 1-Click Copy Failed Leads Logic (Detailed vs Emails Only)
   const handleCopyFailedDetailed = () => {
     if (failedLeadsList.length === 0) return;
     const header = "Failed Lead Email | Sender Used | Reason | Time\n" + "-".repeat(70) + "\n";
@@ -323,10 +294,19 @@ export default function Home() {
     setTimeout(() => setCopiedType(null), 2500);
   };
 
-  // Launch Campaign
+  const handleStopCampaign = () => {
+    isStopRequestedRef.current = true;
+    setLoading(false);
+    setIsCampaignStarted(false);
+    setProgressStatus("Campaign stopped manually by user.");
+    setLastBatchMessage("🛑 Campaign halted. Remaining queue is safely saved.");
+  };
+
   const handleStartCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
+
+    isStopRequestedRef.current = false;
 
     const result = cleanAndFilterLeads(rawSheetData);
     if (result.validEmails.length === 0) {
@@ -356,7 +336,6 @@ export default function Home() {
       ? Math.min(batchSize, currentModeConfig.maxLot) 
       : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
 
-    // Save Initial Queues to LocalStorage (Both Leads and Senders)
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
     localStorage.setItem(
       SENDERS_QUEUE_STORAGE_KEY,
@@ -388,7 +367,6 @@ export default function Home() {
     );
   };
 
-  // 🎯 Batch-Level Execution with Smart Failover & Live Queue Storage Sync
   const consumeQueueBatch = async (
     currentQueue: string[],
     sendersList: SmtpAccount[],
@@ -402,12 +380,13 @@ export default function Home() {
     activePass: string,
     activeName: string
   ) => {
-    if (currentQueue.length === 0) {
+    if (isStopRequestedRef.current || currentQueue.length === 0) {
       setIsCampaignStarted(false);
       setLoading(false);
-      setRawSheetData("");
-      localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
-      alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
+      if (currentQueue.length === 0) {
+        localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+        alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
+      }
       return;
     }
 
@@ -424,6 +403,8 @@ export default function Home() {
 
     try {
       for (let i = 0; i < batchToSend.length; i += activeChunkSize) {
+        if (isStopRequestedRef.current) break;
+
         const chunk = batchToSend.slice(i, i + activeChunkSize);
         const startNum = i + 1;
         const endNum = Math.min(i + activeChunkSize, batchToSend.length);
@@ -449,7 +430,6 @@ export default function Home() {
 
         const data = await res.json();
 
-        // 🚨 SMART FAILOVER: अगर अकाउंट का ऑथ फेल हुआ या डेली कोटा लिमिट पूरी हुई
         if (data.accountError || res.status === 400 || res.status === 401) {
           fallbackTriggered = true;
           const reasonText =
@@ -476,7 +456,6 @@ export default function Home() {
           setAppPassword(nextSender.appPassword);
           setSenderName(nextSender.senderName);
 
-          // Update LocalStorage for remaining healthy senders
           localStorage.setItem(
             SENDERS_QUEUE_STORAGE_KEY,
             JSON.stringify({ senders: remainingSenders, currentIndex: 0, rounds: roundsDone })
@@ -534,13 +513,12 @@ export default function Home() {
         batchSuccessCount += chunkSuccess;
       }
 
-      if (!fallbackTriggered) {
+      if (!isStopRequestedRef.current && !fallbackTriggered) {
         const remainingQueue = currentQueue.slice(batchToSend.length);
         const updatedTotalProcessed = currentProcessed + batchProcessedCount;
         const updatedTotalSuccess = currentSuccess + batchSuccessCount;
         const updatedRounds = roundsDone + 1;
 
-        // 🎯 1. बची हुई लीड्स को स्टेट और LocalStorage दोनों में सुरक्षित रखना
         setPendingEmails(remainingQueue);
         setProcessedCount(updatedTotalProcessed);
         setSuccessCount(updatedTotalSuccess);
@@ -556,7 +534,6 @@ export default function Home() {
           setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched using ${activeEmail}`);
         }
 
-        // 🎯 2. सेंडर्स रोटेशन और क्यू स्टेट को LocalStorage में सिंक रखना
         if (sendersList.length > 0) {
           const nextSenderIdx = (senderIdx + 1) % sendersList.length;
           const nextSender = sendersList[nextSenderIdx];
@@ -580,17 +557,24 @@ export default function Home() {
           setRawSheetData("");
         }
 
-        // 🎛️ 3. Template & Subject Rotation Pause Check
-        if (remainingQueue.length > 0) {
+        if (remainingQueue.length > 0 && rotationMode !== "CONTINUOUS") {
           let shouldPause = false;
+
           if (rotationMode === "EVERY_SINGLE_SENDER") {
             shouldPause = true;
-          } else if (rotationMode === "EVERY_N_SENDERS" && updatedRounds % pauseAfterNSenders === 0) {
-            shouldPause = true;
+          } else if (rotationMode === "EVERY_N_SENDERS") {
+            const n = Math.max(1, pauseAfterNSenders);
+            if (updatedRounds > 0 && updatedRounds % n === 0) {
+              shouldPause = true;
+            }
           }
 
           if (shouldPause) {
-            alert(`⏸️ [Rotation Pause Triggered]\nSender [${activeEmail}] completed its turn.\nPlease update your Subject and Email Template before sending the next batch!`);
+            alert(
+              `⏸️ [Rotation Pause Triggered]\n` +
+              `Sender [${activeEmail}] completed turn #${updatedRounds}.\n` +
+              `Please update your Subject and Email Template before sending the next batch!`
+            );
           }
         }
       }
@@ -608,6 +592,7 @@ export default function Home() {
     const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     const safeBatchSize = batchSize > 0 ? Math.min(batchSize, maxLimit) : DEFAULT_BATCH_SIZE;
 
+    isStopRequestedRef.current = false;
     consumeQueueBatch(
       pendingEmails,
       inMemorySenders,
@@ -626,6 +611,7 @@ export default function Home() {
   const handleFullReset = () => {
     if (loading) return;
     if (confirm("Reset current campaign and clear queue?")) {
+      isStopRequestedRef.current = true;
       setIsCampaignStarted(false);
       setPendingEmails([]);
       setInMemorySenders([]);
@@ -688,7 +674,6 @@ export default function Home() {
 
         <ReferralBanner />
         
-        {/* 🌟 Compact Header */}
         <div className="bg-slate-900/90 border border-slate-800 px-5 py-3 rounded-2xl flex flex-wrap justify-between items-center gap-3 shadow-xl">
           <div className="flex items-center gap-3">
             <img src="/icons/engine-hub.svg" alt="Hub" className="w-7 h-7 object-contain" />
@@ -720,9 +705,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 📊 Compact Unified Monitor Bar */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 bg-slate-900/90 border border-slate-800 p-3 rounded-2xl shadow-lg">
-          {/* Senders Track */}
           <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
             <span className="text-[9px] text-slate-400 uppercase font-black block">Senders Loaded</span>
             <p className="text-base font-black text-white font-mono">{totalAccountsCount}</p>
@@ -742,7 +725,6 @@ export default function Home() {
             <p className="text-base font-black text-indigo-400 font-mono">{remainingAccountsInQueue}</p>
           </div>
 
-          {/* Leads Track */}
           <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
             <span className="text-[9px] text-slate-400 uppercase font-black block">Total Leads</span>
             <p className="text-base font-black text-slate-100 font-mono">{initialTotalCount}</p>
@@ -770,11 +752,19 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Progress Alert */}
         {loading && (
-          <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-2.5 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
-            <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-xs font-mono text-indigo-300 font-bold">{progressStatus}</p>
+          <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-2.5 rounded-2xl flex items-center justify-between shadow-xl animate-pulse">
+            <div className="flex items-center gap-3">
+              <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+              <p className="text-xs font-mono text-indigo-300 font-bold">{progressStatus}</p>
+            </div>
+            <button
+              type="button"
+              onClick={handleStopCampaign}
+              className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-md cursor-pointer"
+            >
+              🛑 Stop Campaign
+            </button>
           </div>
         )}
 
@@ -785,14 +775,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* 🚀 TWO-COLUMN WORKSPACE (Matching 100% Equal Height on Desktop) */}
         {!isCampaignStarted ? (
           <form onSubmit={handleStartCampaign} className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
             
-            {/* ⬅️ LEFT COLUMN: AGE PROFILE, CREDENTIALS & LEADS BOX (col-span-5) */}
             <div className="lg:col-span-5 flex flex-col justify-between gap-3">
               
-              {/* 1. Age Profile Pills */}
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg">
                 <div className="flex justify-between items-center">
                   <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
@@ -828,7 +815,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* 2. Senders Credentials */}
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2.5 shadow-lg">
                 <div>
                   <label className="text-[11px] font-bold text-slate-300 block mb-1">Active Sender Gmail</label>
@@ -881,7 +867,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* 3. Target Leads Box + Auto Clean (🔥 Flex-1 & H-Full to Match Right Column Exactly) */}
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg flex-1 flex flex-col">
                 <div className="flex justify-between items-center">
                   <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
@@ -908,7 +893,6 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* 🔍 Auto Expands to fit remaining height perfectly */}
                 <textarea
                   required
                   disabled={loading}
@@ -921,11 +905,9 @@ export default function Home() {
 
             </div>
 
-            {/* ➡️ RIGHT COLUMN: MODE, BATCH SIZE, TEMPLATE, SIGNOFF & CTA (col-span-7) */}
             <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col justify-between">
               
               <div className="space-y-3">
-                {/* Row 1: Mode Selector & Batch Size */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="text-[11px] font-bold text-indigo-300 block mb-1">Account Mode</label>
@@ -963,7 +945,6 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* 🎛️ Template & Subject Rotation Control Panel */}
                 <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
                   <label className="text-[11px] font-bold text-indigo-300 block">
                     🔄 Template & Subject Rotation Control:
@@ -1009,13 +990,12 @@ export default function Home() {
                         max={totalAccountsCount || 10} 
                         value={pauseAfterNSenders}
                         onChange={(e) => setPauseAfterNSenders(parseInt(e.target.value) || 1)}
-                        className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center"
+                        className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                       />
                     </div>
                   )}
                 </div>
 
-                {/* Row 2: Subject Line */}
                 <div>
                   <label className="text-[11px] font-bold text-slate-300 block mb-1">Subject Line</label>
                   <input
@@ -1029,7 +1009,6 @@ export default function Home() {
                   />
                 </div>
 
-                {/* Row 3: Email Body Template */}
                 <div className="space-y-1">
                   <div className="flex justify-between items-center">
                     <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
@@ -1038,7 +1017,7 @@ export default function Home() {
                     </label>
                     <button
                       type="button"
-                      onClick={handleGenerateSpintaxPreviews}
+                      onClick={() => setShowPreviewModal(true)}
                       className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
                     >
                       👁️ Spintax Preview (4 Samples)
@@ -1051,12 +1030,11 @@ export default function Home() {
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
-                    placeholder="Type your outreach message here... Automatic Greetings, Openers & Signoffs are appended per recipient."
+                    placeholder="Type your outreach message here..."
                     className="w-full min-h-[230px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
                   />
                 </div>
 
-                {/* Row 4: Custom Signoff Footer */}
                 <div>
                   <label className="text-[11px] font-bold text-emerald-400 block mb-1">Custom Signature & Signoff Details</label>
                   <input
@@ -1070,7 +1048,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Launch Campaign CTA (Aligned perfectly at the bottom) */}
               <button
                 type="submit"
                 disabled={loading}
@@ -1092,7 +1069,6 @@ export default function Home() {
 
           </form>
         ) : (
-          /* STEP 2: IN-MEMORY AUTO-ROTATION DASHBOARD */
           <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
             {remainingCount > 0 ? (
               <form onSubmit={handleNextBatch} className="space-y-3 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
@@ -1101,9 +1077,18 @@ export default function Home() {
                     <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
                     Next Batch: {currentBatchTarget} Pending Leads Ready
                   </h3>
-                  <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
-                    Remaining in Queue: {remainingCount}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
+                      Remaining in Queue: {remainingCount}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleStopCampaign}
+                      className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-sm cursor-pointer"
+                    >
+                      🛑 Stop Campaign
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -1182,7 +1167,6 @@ export default function Home() {
 
       </div>
 
-      {/* 🛡️ Rejected Leads Audit Modal */}
       <RejectedLeadsModal
         isOpen={showRejectedModal}
         onClose={() => setShowRejectedModal(false)}
@@ -1190,7 +1174,6 @@ export default function Home() {
         stats={rejectedStats}
       />
 
-      {/* 🔴 Live Delivery Failed Leads Modal (with 1-Click Copy Detailed Log & Emails) */}
       {showFailedModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
           <div className="bg-slate-900 border border-rose-500/40 w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4">
@@ -1211,7 +1194,6 @@ export default function Home() {
               </button>
             </div>
 
-            {/* 🎯 1-Click Copy Buttons Bar */}
             <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
               <span className="text-[11px] text-slate-400 font-mono">Export / Clipboard Actions:</span>
               <div className="flex items-center gap-2">
@@ -1234,7 +1216,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Failed Leads Cards List */}
             <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
               {failedLeadsList.map((item, idx) => (
                 <div key={idx} className="bg-slate-950 p-3 rounded-xl border border-rose-950/80 flex flex-col sm:flex-row justify-between sm:items-center gap-1 text-xs">
@@ -1253,12 +1234,14 @@ export default function Home() {
         </div>
       )}
 
-      {/* 🎲 Spintax Live Variations Modal */}
+      {/* SpintaxPreviewModal अब सीधे raw template, subject और signoff को props में लेता है */}
       <SpintaxPreviewModal
         isOpen={showPreviewModal}
         onClose={() => setShowPreviewModal(false)}
-        samples={previewSamples}
-        onReRoll={handleGenerateSpintaxPreviews}
+        template={template}
+        subject={subject}
+        senderName={senderName}
+        customSignoffName={customSignoffName}
       />
     </main>
   );

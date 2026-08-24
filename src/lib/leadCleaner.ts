@@ -1,22 +1,5 @@
 // src/lib/leadCleaner.ts
 
-export const GREETINGS = ["Hi,", "Hello,", "Hey,", "Hi there,"];
-
-export const OPENERS = [
-  "Hope you are having a productive week.",
-  "Hope this note finds you well.",
-  "Hope everything is going well on your end.",
-  "Reaching out to quickly connect.",
-];
-
-export const SIGN_OFFS = [
-  "Best regards,",
-  "Thanks & regards,",
-  "Warm regards,",
-  "Best,",
-  "Thanks,",
-];
-
 const DISPOSABLE_DOMAINS = new Set([
   "mailinator.com",
   "tempmail.com",
@@ -30,7 +13,7 @@ const DISPOSABLE_DOMAINS = new Set([
   "dispostable.com",
 ]);
 
-const EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
 export interface RejectedEmailItem {
   email: string;
@@ -51,7 +34,7 @@ export interface CleanLeadsResult {
 }
 
 export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
-  const lines = rawInput.split(/[\n,;]+/).map((l) => l.trim()).filter(Boolean);
+  const lines = rawInput.split(/[\n,;\t]+/).map((l) => l.trim()).filter(Boolean);
   const seen = new Set<string>();
   const validEmails: string[] = [];
   const rejectedList: RejectedEmailItem[] = [];
@@ -61,6 +44,16 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
   let disposableCount = 0;
 
   for (const raw of lines) {
+    if (/\s/.test(raw)) {
+      syntaxErrorsCount++;
+      rejectedList.push({
+        email: raw,
+        reason: "INVALID_SYNTAX",
+        description: "Email contains unexpected whitespace",
+      });
+      continue;
+    }
+
     const email = raw.toLowerCase();
 
     if (!EMAIL_REGEX.test(email)) {
@@ -68,7 +61,7 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       rejectedList.push({
         email: raw,
         reason: "INVALID_SYNTAX",
-        description: "Invalid syntax format or illegal characters",
+        description: "Invalid email syntax or format",
       });
       continue;
     }
@@ -78,7 +71,7 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       rejectedList.push({
         email: raw,
         reason: "DUPLICATE",
-        description: "Duplicate recipient in this campaign batch",
+        description: "Duplicate email found in batch",
       });
       continue;
     }
@@ -89,13 +82,13 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       rejectedList.push({
         email: raw,
         reason: "DISPOSABLE_DOMAIN",
-        description: "Disposable or temporary mail domain detected",
+        description: "Disposable/temporary mail domain blocked",
       });
       continue;
     }
 
     seen.add(email);
-    validEmails.push(raw);
+    validEmails.push(email);
   }
 
   return {
@@ -108,58 +101,5 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
     syntaxErrorsCount,
     disposableCount,
     rejectedList,
-  };
-}
-
-const pickRandom = (arr: string[]): string => arr[Math.floor(Math.random() * arr.length)];
-
-export function generateBackendMatchedVariation(
-  template: string,
-  subject: string,
-  senderName: string,
-  customSignoffName: string
-): { subject: string; body: string } {
-  const cleanHeaderName = (senderName || "Ruby").trim();
-  const finalSignoffName =
-    customSignoffName && customSignoffName.trim().length > 0
-      ? customSignoffName.trim()
-      : cleanHeaderName;
-
-  const cleanUserBody = template
-    .trim()
-    .replace(/^(hi|hello|hey|greetings|dear)[^\n]*\n+/i, "")
-    .replace(
-      /^(hope this note finds you well|hope you are having a productive week|hope you are doing well|hope everything is going well|reaching out to quickly connect)[^\n]*\n+/i,
-      ""
-    )
-    .trim();
-
-  // Spintax inline regex resolver for custom user brackets {OptionA|OptionB}
-  const spintaxRegex = /\{([^{}]+)\}/g;
-  let resolvedBody = cleanUserBody;
-  while (spintaxRegex.test(resolvedBody)) {
-    resolvedBody = resolvedBody.replace(spintaxRegex, (_, match) => {
-      const choices = match.split("|");
-      return choices[Math.floor(Math.random() * choices.length)];
-    });
-  }
-
-  let resolvedSubject = subject.trim() || "(No Subject)";
-  while (spintaxRegex.test(resolvedSubject)) {
-    resolvedSubject = resolvedSubject.replace(spintaxRegex, (_, match) => {
-      const choices = match.split("|");
-      return choices[Math.floor(Math.random() * choices.length)];
-    });
-  }
-
-  const randomGreeting = pickRandom(GREETINGS);
-  const randomOpener = pickRandom(OPENERS);
-  const randomSignOff = pickRandom(SIGN_OFFS);
-
-  const fullEmailText = `${randomGreeting}\n\n${randomOpener}\n\n${resolvedBody || "(Your message body will appear here)"}\n\n${randomSignOff}\n\n${finalSignoffName}`;
-
-  return {
-    subject: resolvedSubject,
-    body: fullEmailText,
   };
 }
