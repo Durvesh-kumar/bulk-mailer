@@ -2,15 +2,47 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Link from "next/link";
 import { getClientMachineId } from "@/lib/fingerprint";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import ReferralBanner from "@/components/ReferralBanner";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 
-const STORAGE_KEY = "inboxsend_queue_session";
+// 🚀 Smart Modules & Modals Integration
+import RejectedLeadsModal from "@/components/modals/RejectedLeadsModal";
+import SpintaxPreviewModal from "@/components/modals/SpintaxPreviewModal";
+import { cleanAndFilterLeads, generateBackendMatchedVariation, RejectedEmailItem } from "@/lib/leadCleaner";
+
+export type ProfileTier = "CURRENT" | "YEAR_1" | "YEAR_2" | "YEAR_4" | "YEAR_6";
+
 const SESSION_TOKEN_KEY = "reachout_daily_session_token";
+const PENDING_QUEUE_STORAGE_KEY = "inboxsend_pending_queue_state";
+const SENDERS_QUEUE_STORAGE_KEY = "inboxsend_senders_state";
 const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
+
+interface SmtpAccount {
+  _id: string;
+  email: string;
+  appPassword: string;
+  senderName: string;
+  profileTier: ProfileTier;
+}
+
+interface FailedEmailItem {
+  email: string;
+  reason: string;
+  senderUsed: string;
+  time: string;
+}
+
+const TIER_META: Record<ProfileTier, { label: string; badge: string; modeMap: AccountAgeMode; color: string }> = {
+  CURRENT: { label: "Fresh (<6 Mo)", badge: "🔴 Fresh", modeMap: "FRESH", color: "border-rose-500 text-rose-300 bg-rose-950/30" },
+  YEAR_1: { label: "1 Year Aged", badge: "🟡 1 Year", modeMap: "STANDARD", color: "border-amber-500 text-amber-300 bg-amber-950/30" },
+  YEAR_2: { label: "2 Year Aged", badge: "🟢 2 Year", modeMap: "AGED", color: "border-emerald-500 text-emerald-300 bg-emerald-950/30" },
+  YEAR_4: { label: "4 Year Prime", badge: "💎 4 Year", modeMap: "AGED", color: "border-blue-500 text-blue-300 bg-blue-950/30" },
+  YEAR_6: { label: "6+ Year Ultra", badge: "👑 6+ Year", modeMap: "AGED", color: "border-purple-500 text-purple-300 bg-purple-950/30" },
+};
 
 export default function Home() {
   // Security & License State
@@ -21,10 +53,22 @@ export default function Home() {
   const [machineId, setMachineId] = useState("");
   const [appDomain, setAppDomain] = useState("");
 
-  // Campaign Form State
+  // 🎯 Selected Age Profile Tier
+  const [selectedTier, setSelectedTier] = useState<ProfileTier>("YEAR_2");
+  const [isVaultLoaded, setIsVaultLoaded] = useState(false);
+
+  // Active Sender State (Visible & Live in UI)
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+
+  // Senders Account Rotation Stats
+  const [inMemorySenders, setInMemorySenders] = useState<SmtpAccount[]>([]);
+  const [currentSenderIndex, setCurrentSenderIndex] = useState<number>(0);
+  const [sendersUsedRounds, setSendersUsedRounds] = useState<number>(0);
+
+  // Campaign Form State
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
   const [subject, setSubject] = useState("");
@@ -32,7 +76,7 @@ export default function Home() {
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
-  // Queue & Progress State (Supports 1000s of Leads)
+  // Leads Queue & Progress State
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
@@ -43,18 +87,30 @@ export default function Home() {
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
   const [lastBatchMessage, setLastBatchMessage] = useState<string>("");
 
-  // 1. License & Device Verification
+  // 🛡️ Rejected Leads Auditor
+  const [showRejectedModal, setShowRejectedModal] = useState(false);
+  const [rejectedData, setRejectedData] = useState<RejectedEmailItem[]>([]);
+  const [rejectedStats, setRejectedStats] = useState({ total: 0, dups: 0, syntax: 0, temp: 0 });
+
+  // 🔴 Delivery Failed Leads Tracker & Copy Feedback State
+  const [failedLeadsList, setFailedLeadsList] = useState<FailedEmailItem[]>([]);
+  const [showFailedModal, setShowFailedModal] = useState(false);
+  const [copiedType, setCopiedType] = useState<"DETAILED" | "EMAILS" | null>(null);
+
+  // 🎲 Spintax Preview
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [previewSamples, setPreviewSamples] = useState<{ subject: string; body: string }[]>([]);
+
+  // 1. License Check & Dual Queue Autosave Restorer (Leads + Senders)
   useEffect(() => {
     async function initSecurityAndLicense() {
       try {
         const currentDomain = window.location.hostname;
         setAppDomain(currentDomain);
-
         const currentMachineId = await getClientMachineId();
         setMachineId(currentMachineId);
 
         const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-
         const res = await fetch("/api/check-license", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -66,22 +122,58 @@ export default function Home() {
         });
 
         const data = await res.json();
-
         if (!res.ok || !data.allowed) {
           setIsSuspended(true);
-          if (data.reason === "EXPIRED") {
-            setUserType("EXPIRED");
-            setExpiryDate(data.expiryDate || "Expired");
-          } else if (data.reason === "SUSPENDED") {
-            setUserType("SUSPENDED");
-          } else {
-            // NEW_DEVICE or Unregistered Domain default
-            setUserType("NEW_USER");
-          }
+          setUserType(data.reason === "EXPIRED" ? "EXPIRED" : data.reason === "SUSPENDED" ? "SUSPENDED" : "NEW_USER");
+          if (data.expiryDate) setExpiryDate(data.expiryDate);
         } else {
           setIsSuspended(false);
-          if (data.sessionToken) {
-            localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          if (data.sessionToken) localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+
+          // 💾 1. Auto-Restore Pending Leads Queue
+          try {
+            const savedQueue = localStorage.getItem(PENDING_QUEUE_STORAGE_KEY);
+            if (savedQueue) {
+              const parsed = JSON.parse(savedQueue);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                setPendingEmails(parsed);
+                setRawSheetData(parsed.join("\n"));
+                setInitialTotalCount(parsed.length);
+                setIsCampaignStarted(true);
+                setLastBatchMessage(`⚡ Restored ${parsed.length} pending leads from last active session`);
+              }
+            }
+          } catch (e) {
+            console.error("Queue restore error:", e);
+          }
+
+          // 💾 2. Auto-Restore Active Senders Queue State
+          try {
+            const savedSendersState = localStorage.getItem(SENDERS_QUEUE_STORAGE_KEY);
+            if (savedSendersState) {
+              const parsedState = JSON.parse(savedSendersState);
+              if (parsedState.senders && parsedState.senders.length > 0) {
+                setInMemorySenders(parsedState.senders);
+                const sIdx = parsedState.currentIndex || 0;
+                setCurrentSenderIndex(sIdx);
+                setSendersUsedRounds(parsedState.rounds || 0);
+
+                const active = parsedState.senders[sIdx] || parsedState.senders[0];
+                setSenderEmail(active.email);
+                setAppPassword(active.appPassword);
+                setSenderName(active.senderName);
+                if (active.profileTier) {
+                  const tierKey = active.profileTier as ProfileTier;
+                  setSelectedTier(tierKey);
+                  if (TIER_META[tierKey]) {
+                    setAccountAgeMode(TIER_META[tierKey].modeMap);
+                  }
+                }
+                setIsVaultLoaded(true);
+              }
+            }
+          } catch (e) {
+            console.error("Senders restore error:", e);
           }
         }
       } catch {
@@ -91,74 +183,60 @@ export default function Home() {
         setLoadingLicense(false);
       }
     }
-
     initSecurityAndLicense();
   }, []);
 
-  // 2. Restore Active Campaign State from Local Storage
-  useEffect(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.isCampaignStarted && parsed.pendingEmails && parsed.pendingEmails.length > 0) {
-          setPendingEmails(parsed.pendingEmails);
-          setInitialTotalCount(parsed.initialTotalCount || 0);
-          setProcessedCount(parsed.processedCount || 0);
-          setSuccessCount(parsed.successCount || 0);
-          setSenderName(parsed.senderName || "");
-          setSenderEmail(parsed.senderEmail || "");
-          setSubject(parsed.subject || "");
-          setTemplate(parsed.template || "");
-          setCustomSignoffName(parsed.customSignoffName || "");
-          setBatchSize(parsed.batchSize || DEFAULT_BATCH_SIZE);
-          setAccountAgeMode(parsed.accountAgeMode || "AGED");
-          setIsCampaignStarted(true);
-          setRawSheetData(parsed.pendingEmails.join("\n"));
+  // 2. 🎯 STRICT SINGLE-TIER REPLACEMENT: क्लिक होते ही पुराना सेंडर डेटा डंप और नया टियर लोड
+  const handleLoadTierAccounts = async (tier: ProfileTier) => {
+    if (!machineId) return;
+    setLoading(true);
+    setProgressStatus(`Loading ${TIER_META[tier].label} accounts...`);
+
+    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
+    try {
+      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}&tier=${tier}`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "x-session-token": savedSession,
+        },
+      });
+
+      const data = await res.json();
+      if (data.accounts && data.accounts.length > 0) {
+        // ⚡ केवल इसी टियर के अकाउंट्स स्टोर होंगे, पिछला सारा सेंडर डेटा बाहर
+        const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
+        
+        if (currentTierOnly.length > 0) {
+          setInMemorySenders(currentTierOnly);
+          setCurrentSenderIndex(0);
+          setSendersUsedRounds(0);
+          setSenderEmail(currentTierOnly[0].email);
+          setAppPassword(currentTierOnly[0].appPassword);
+          setSenderName(currentTierOnly[0].senderName);
+          setSelectedTier(tier);
+          setAccountAgeMode(TIER_META[tier].modeMap);
+          setIsVaultLoaded(true);
+          setLastBatchMessage(`⚡ Loaded ${currentTierOnly.length} account(s) for ${TIER_META[tier].label}`);
+
+          // LocalStorage में भी केवल यही नया टियर रहेगा, पिछला डेटा ओवरराइट हो जाएगा
+          localStorage.setItem(
+            SENDERS_QUEUE_STORAGE_KEY,
+            JSON.stringify({ senders: currentTierOnly, currentIndex: 0, rounds: 0 })
+          );
+        } else {
+          alert(`No accounts registered under ${TIER_META[tier].label} in your Vault.`);
         }
-      } catch (e) {
-        console.error("Local queue parse error:", e);
+      } else {
+        alert(`No accounts registered under ${TIER_META[tier].label} in your Vault.`);
       }
+    } catch {
+      alert("Failed to load vault accounts.");
+    } finally {
+      setLoading(false);
+      setProgressStatus("");
     }
-  }, []);
-
-  // Save State Helper
-  const saveQueueState = (
-    remainingList: string[],
-    totalInit: number,
-    processed: number,
-    delivered: number,
-    name: string,
-    fromEmail: string,
-    sub: string,
-    tmpl: string,
-    signName: string,
-    bSize: number,
-    mode: AccountAgeMode,
-    active: boolean
-  ) => {
-    if (remainingList.length === 0) {
-      localStorage.removeItem(STORAGE_KEY);
-      return;
-    }
-
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        pendingEmails: remainingList,
-        initialTotalCount: totalInit,
-        processedCount: processed,
-        successCount: delivered,
-        senderName: name.trim(),
-        senderEmail: fromEmail.trim().toLowerCase(),
-        subject: sub.trim(),
-        template: tmpl.trim(),
-        customSignoffName: signName.trim(),
-        batchSize: bSize,
-        accountAgeMode: mode,
-        isCampaignStarted: active,
-      })
-    );
   };
 
   const handleBatchSizeChange = (val: string) => {
@@ -182,70 +260,150 @@ export default function Home() {
     }
   };
 
-  const extractCleanEmails = (text: string): string[] => {
-    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    const matches = text.match(emailRegex) || [];
-    return Array.from(new Set(matches.map((e) => e.trim().toLowerCase())));
+  // 🧹 1. Smart Clean Action
+  const handleAutoCleanLeads = () => {
+    if (!rawSheetData.trim()) {
+      alert("⚠️ Please paste your email leads list in the box first to clean!");
+      return;
+    }
+
+    const result = cleanAndFilterLeads(rawSheetData);
+    setRawSheetData(result.cleanedText);
+    setRejectedData(result.rejectedList);
+    setRejectedStats({
+      total: result.rejectedCount,
+      dups: result.duplicatesCount,
+      syntax: result.syntaxErrorsCount,
+      temp: result.disposableCount,
+    });
+
+    if (result.rejectedCount > 0) {
+      setShowRejectedModal(true);
+    } else if (result.validEmails.length > 0) {
+      alert(`✨ All ${result.validEmails.length} leads are 100% clean and valid!`);
+    } else {
+      alert("❌ No valid email addresses found.");
+    }
   };
 
-  // Launch Campaign (Unlimited Queue Allowed)
+  // 🎲 2. Generate 4 Live Spintax Samples
+  const handleGenerateSpintaxPreviews = () => {
+    const samples = [];
+    for (let i = 0; i < 4; i++) {
+      samples.push(
+        generateBackendMatchedVariation(template, subject, senderName || "Team", customSignoffName)
+      );
+    }
+    setPreviewSamples(samples);
+    setShowPreviewModal(true);
+  };
+
+  // 📋 3. 1-Click Copy Failed Leads Logic (Detailed vs Emails Only)
+  const handleCopyFailedDetailed = () => {
+    if (failedLeadsList.length === 0) return;
+    const header = "Failed Lead Email | Sender Used | Reason | Time\n" + "-".repeat(70) + "\n";
+    const body = failedLeadsList
+      .map((item) => `${item.email} | Sender: ${item.senderUsed} | Reason: ${item.reason} | Time: ${item.time}`)
+      .join("\n");
+
+    navigator.clipboard.writeText(header + body);
+    setCopiedType("DETAILED");
+    setTimeout(() => setCopiedType(null), 2500);
+  };
+
+  const handleCopyFailedEmailsOnly = () => {
+    if (failedLeadsList.length === 0) return;
+    const emailsText = failedLeadsList.map((item) => item.email).join("\n");
+    navigator.clipboard.writeText(emailsText);
+    setCopiedType("EMAILS");
+    setTimeout(() => setCopiedType(null), 2500);
+  };
+
+  // Launch Campaign
   const handleStartCampaign = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
 
-    const emails = extractCleanEmails(rawSheetData);
-    if (emails.length === 0) {
-      alert("Please paste valid email addresses!");
+    const result = cleanAndFilterLeads(rawSheetData);
+    if (result.validEmails.length === 0) {
+      alert("Please paste valid email addresses in the target leads box!");
       return;
     }
 
+    if (!senderEmail || !appPassword || !senderName) {
+      alert("Sender credentials missing! Please select an Age Profile or enter details.");
+      return;
+    }
+
+    let activeSenders = inMemorySenders;
+    if (activeSenders.length === 0) {
+      activeSenders = [{
+        _id: "manual_1",
+        email: senderEmail.trim().toLowerCase(),
+        appPassword: appPassword.replace(/\s+/g, ""),
+        senderName: senderName.trim(),
+        profileTier: selectedTier,
+      }];
+      setInMemorySenders(activeSenders);
+    }
+
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    
-    // 🔒 Only clamp batchSize to the mode's maxLot (Queue itself is unlimited)
     const safeBatchSize = batchSize > 0 
       ? Math.min(batchSize, currentModeConfig.maxLot) 
       : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
 
-    const cleanName = senderName.trim();
-    const cleanEmail = senderEmail.trim().toLowerCase();
-    const cleanPass = appPassword.replace(/\s+/g, "");
-    const cleanSub = subject.trim();
-    const cleanTmpl = template.trim();
-    const cleanSignName = customSignoffName.trim();
+    // Save Initial Queues to LocalStorage (Both Leads and Senders)
+    localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
+    localStorage.setItem(
+      SENDERS_QUEUE_STORAGE_KEY,
+      JSON.stringify({ senders: activeSenders, currentIndex: 0, rounds: 0 })
+    );
 
-    setPendingEmails(emails);
-    setInitialTotalCount(emails.length);
+    setPendingEmails(result.validEmails);
+    setInitialTotalCount(result.validEmails.length);
     setProcessedCount(0);
     setSuccessCount(0);
+    setSendersUsedRounds(0);
+    setFailedLeadsList([]);
+    setCurrentSenderIndex(0);
     setIsCampaignStarted(true);
     setLastBatchMessage("");
 
-    saveQueueState(emails, emails.length, 0, 0, cleanName, cleanEmail, cleanSub, cleanTmpl, cleanSignName, safeBatchSize, accountAgeMode, true);
-    await consumeQueueBatch(emails, emails.length, 0, 0, safeBatchSize, cleanName, cleanEmail, cleanPass, cleanSub, cleanTmpl, cleanSignName, accountAgeMode);
+    await consumeQueueBatch(
+      result.validEmails,
+      activeSenders,
+      0,
+      0,
+      0,
+      0,
+      safeBatchSize,
+      accountAgeMode,
+      senderEmail.trim().toLowerCase(),
+      appPassword.replace(/\s+/g, ""),
+      senderName.trim()
+    );
   };
 
-  // Process and Rotate Queue
+  // 🎯 Batch-Level Execution with Smart Failover & Live Queue Storage Sync
   const consumeQueueBatch = async (
     currentQueue: string[],
-    totalInit: number,
+    sendersList: SmtpAccount[],
+    senderIdx: number,
+    roundsDone: number,
     currentProcessed: number,
     currentSuccess: number,
-    size: number,
-    activeName: string,
+    bSize: number,
+    mode: AccountAgeMode,
     activeEmail: string,
     activePass: string,
-    activeSub: string,
-    activeTmpl: string,
-    activeSignName: string,
-    mode: AccountAgeMode
+    activeName: string
   ) => {
     if (currentQueue.length === 0) {
-      alert("All leads have been processed successfully!");
-      return;
-    }
-
-    if (!activeEmail || !activePass) {
-      alert("Please enter Sender Email and App Password for this batch!");
+      setIsCampaignStarted(false);
+      setLoading(false);
+      setRawSheetData("");
+      localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+      alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
       return;
     }
 
@@ -253,22 +411,20 @@ export default function Home() {
     setLastBatchMessage("");
     let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
     
-    const batchToSend = currentQueue.slice(0, size);
-    let workingQueue = [...currentQueue];
-    let updatedProcessed = currentProcessed;
-    let updatedSuccess = currentSuccess;
+    const batchToSend = currentQueue.slice(0, bSize);
+    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 10;
 
-    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 8;
+    let batchProcessedCount = 0;
+    let batchSuccessCount = 0;
+    let fallbackTriggered = false;
 
     try {
-      const currentMachineId = await getClientMachineId();
-
       for (let i = 0; i < batchToSend.length; i += activeChunkSize) {
         const chunk = batchToSend.slice(i, i + activeChunkSize);
         const startNum = i + 1;
         const endNum = Math.min(i + activeChunkSize, batchToSend.length);
 
-        setProgressStatus(`Dispatching batch ${startNum} to ${endNum} of ${batchToSend.length} (${mode} mode)...`);
+        setProgressStatus(`[${activeEmail}] Dispatching ${startNum}-${endNum} of ${batchToSend.length}...`);
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -278,30 +434,69 @@ export default function Home() {
             senderEmail: activeEmail.trim().toLowerCase(),
             appPassword: activePass.replace(/\s+/g, ""),
             recipients: chunk,
-            subject: activeSub.trim(),
-            template: activeTmpl.trim(),
-            customSignoffName: activeSignName.trim(),
+            subject: subject.trim(),
+            template: template.trim(),
+            customSignoffName: customSignoffName.trim(),
             accountAgeMode: mode,
-            machineId: currentMachineId,
+            machineId,
             sessionToken: latestSessionToken,
           }),
         });
 
         const data = await res.json();
 
+        // 🚨 SMART FAILOVER: अगर अकाउंट का ऑथ फेल हुआ या डेली कोटा लिमिट पूरी हुई
+        if (data.accountError || res.status === 400 || res.status === 401) {
+          fallbackTriggered = true;
+          const reasonText =
+            data.accountErrorType === "QUOTA_EXCEEDED"
+              ? "Daily Sending Quota Exceeded"
+              : "Authentication Failed / Invalid Password";
+
+          alert(`⚠️ [${activeEmail}] ${reasonText}!\n⚡ Auto-switching to next healthy account from Vault...`);
+
+          const remainingSenders = sendersList.filter(
+            (s) => s.email.toLowerCase() !== activeEmail.toLowerCase()
+          );
+
+          if (remainingSenders.length === 0) {
+            alert("❌ All sender accounts in this tier failed or hit daily limit. Please update accounts in Vault.");
+            setLoading(false);
+            return;
+          }
+
+          const nextSender = remainingSenders[0];
+          setInMemorySenders(remainingSenders);
+          setCurrentSenderIndex(0);
+          setSenderEmail(nextSender.email);
+          setAppPassword(nextSender.appPassword);
+          setSenderName(nextSender.senderName);
+
+          // Update LocalStorage for remaining healthy senders
+          localStorage.setItem(
+            SENDERS_QUEUE_STORAGE_KEY,
+            JSON.stringify({ senders: remainingSenders, currentIndex: 0, rounds: roundsDone })
+          );
+
+          const unhandledQueue = currentQueue.slice(batchProcessedCount);
+          await consumeQueueBatch(
+            unhandledQueue,
+            remainingSenders,
+            0,
+            roundsDone,
+            currentProcessed + batchProcessedCount,
+            currentSuccess + batchSuccessCount,
+            bSize,
+            mode,
+            nextSender.email,
+            nextSender.appPassword,
+            nextSender.senderName
+          );
+          return;
+        }
+
         if (res.status === 403) {
           setIsSuspended(true);
-          if (data.reason === "EXPIRED") {
-            setUserType("EXPIRED");
-            setExpiryDate(data.expiryDate || "Expired");
-          } else if (data.reason === "SUSPENDED") {
-            setUserType("SUSPENDED");
-          } else {
-            setUserType("NEW_USER");
-          }
-          if (data.clearSession) {
-            localStorage.removeItem(SESSION_TOKEN_KEY);
-          }
           break;
         }
 
@@ -315,113 +510,126 @@ export default function Home() {
           localStorage.setItem(SESSION_TOKEN_KEY, latestSessionToken);
         }
 
-        const chunkResults: { status: string }[] = data.report || [];
+        const chunkResults: { email: string; status: string; error?: string }[] = data.report || [];
         const chunkSuccess = chunkResults.filter((r) => r.status === "SUCCESS").length;
+
+        const newlyFailed = chunkResults
+          .filter((r) => r.status === "FAILED")
+          .map((r) => ({
+            email: r.email,
+            reason: r.error || "SMTP Delivery Refused",
+            senderUsed: activeEmail,
+            time: new Date().toLocaleTimeString(),
+          }));
+
+        if (newlyFailed.length > 0) {
+          setFailedLeadsList((prev) => [...prev, ...newlyFailed]);
+        }
         
-        workingQueue = workingQueue.slice(chunk.length);
-        updatedProcessed += chunk.length;
-        updatedSuccess += chunkSuccess;
-
-        setPendingEmails([...workingQueue]);
-        setProcessedCount(updatedProcessed);
-        setSuccessCount(updatedSuccess);
-
-        saveQueueState(
-          workingQueue,
-          totalInit,
-          updatedProcessed,
-          updatedSuccess,
-          activeName,
-          activeEmail,
-          activeSub,
-          activeTmpl,
-          activeSignName,
-          size,
-          mode,
-          true
-        );
+        batchProcessedCount += chunk.length;
+        batchSuccessCount += chunkSuccess;
       }
 
-      if (batchToSend.length > 0) {
-        setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched and removed from queue.`);
-      }
+      if (!fallbackTriggered) {
+        const remainingQueue = currentQueue.slice(batchToSend.length);
+        const updatedTotalProcessed = currentProcessed + batchProcessedCount;
+        const updatedTotalSuccess = currentSuccess + batchSuccessCount;
+        const updatedRounds = roundsDone + 1;
 
-      // Automatically clean up when queue is completely empty
-      if (workingQueue.length === 0) {
-        setIsCampaignStarted(false);
-        setRawSheetData("");
-        setSubject("");
-        setTemplate("");
-        setCustomSignoffName("");
-        localStorage.removeItem(STORAGE_KEY);
+        // 🎯 1. बची हुई लीड्स को स्टेट और LocalStorage दोनों में सुरक्षित रखना
+        setPendingEmails(remainingQueue);
+        setProcessedCount(updatedTotalProcessed);
+        setSuccessCount(updatedTotalSuccess);
+        setSendersUsedRounds(updatedRounds);
+
+        if (remainingQueue.length > 0) {
+          localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(remainingQueue));
+        } else {
+          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+        }
+
+        if (batchToSend.length > 0) {
+          setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched using ${activeEmail}`);
+        }
+
+        // 🎯 2. सेंडर्स रोटेशन और क्यू स्टेट को LocalStorage में सिंक रखना
+        if (sendersList.length > 0) {
+          const nextSenderIdx = (senderIdx + 1) % sendersList.length;
+          const nextSender = sendersList[nextSenderIdx];
+          setCurrentSenderIndex(nextSenderIdx);
+          setSenderEmail(nextSender.email);
+          setAppPassword(nextSender.appPassword);
+          setSenderName(nextSender.senderName);
+
+          localStorage.setItem(
+            SENDERS_QUEUE_STORAGE_KEY,
+            JSON.stringify({
+              senders: sendersList,
+              currentIndex: nextSenderIdx,
+              rounds: updatedRounds,
+            })
+          );
+        }
+
+        if (remainingQueue.length === 0) {
+          setIsCampaignStarted(false);
+          setRawSheetData("");
+        }
       }
     } catch {
-      alert("Failed to connect to server. Please check your internet connection.");
+      alert("Network error. Please check your connection.");
     } finally {
       setLoading(false);
       setProgressStatus("");
     }
   };
 
-  // Dispatch Next Batch
   const handleNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
-    if (loading) return;
+    if (loading || pendingEmails.length === 0) return;
     const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     const safeBatchSize = batchSize > 0 ? Math.min(batchSize, maxLimit) : DEFAULT_BATCH_SIZE;
 
-    saveQueueState(
-      pendingEmails,
-      initialTotalCount,
-      processedCount,
-      successCount,
-      senderName.trim(),
-      senderEmail.trim().toLowerCase(),
-      subject.trim(),
-      template.trim(),
-      customSignoffName.trim(),
-      safeBatchSize,
-      accountAgeMode,
-      true
-    );
-
     consumeQueueBatch(
       pendingEmails,
-      initialTotalCount,
+      inMemorySenders,
+      currentSenderIndex,
+      sendersUsedRounds,
       processedCount,
       successCount,
       safeBatchSize,
-      senderName.trim(),
-      senderEmail.trim().toLowerCase(),
-      appPassword.replace(/\s+/g, ""),
-      subject.trim(),
-      template.trim(),
-      customSignoffName.trim(),
-      accountAgeMode
+      accountAgeMode,
+      senderEmail,
+      appPassword,
+      senderName
     );
   };
 
-  // Reset Everything
   const handleFullReset = () => {
     if (loading) return;
-    if (confirm("Are you sure you want to reset the campaign? All active progress and queue will be cleared.")) {
-      localStorage.removeItem(STORAGE_KEY);
+    if (confirm("Reset current campaign and clear queue?")) {
       setIsCampaignStarted(false);
       setPendingEmails([]);
+      setInMemorySenders([]);
+      setIsVaultLoaded(false);
       setInitialTotalCount(0);
       setProcessedCount(0);
       setSuccessCount(0);
+      setSendersUsedRounds(0);
+      setCurrentSenderIndex(0);
+      setFailedLeadsList([]);
       setRawSheetData("");
-      setAppPassword("");
-      setSenderEmail("");
-      setSenderName("");
       setSubject("");
       setTemplate("");
       setCustomSignoffName("");
-      setAccountAgeMode("AGED");
+      setSenderEmail("");
+      setAppPassword("");
+      setSenderName("");
       setBatchSize(DEFAULT_BATCH_SIZE);
       setProgressStatus("");
       setLastBatchMessage("");
+      localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+      localStorage.removeItem(SENDERS_QUEUE_STORAGE_KEY);
     }
   };
 
@@ -429,7 +637,7 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 text-xs font-mono gap-3">
         <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-        <span className="tracking-wide">Verifying Security Gateway & License...</span>
+        <span>Verifying Security Gateway...</span>
       </div>
     );
   }
@@ -451,336 +659,277 @@ export default function Home() {
   const currentMaxLot = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
   const currentBatchTarget = Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
 
+  const totalAccountsCount = inMemorySenders.length;
+  const remainingAccountsInQueue = totalAccountsCount > 0 
+    ? (totalAccountsCount - (currentSenderIndex % totalAccountsCount)) 
+    : 0;
+
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100 py-8 px-4 selection:bg-indigo-500 selection:text-white">
-      <div className="max-w-4xl mx-auto space-y-6">
+    <main className="min-h-screen bg-slate-950 text-slate-100 py-5 px-3 sm:px-6 font-sans selection:bg-indigo-500 selection:text-white">
+      <div className="max-w-7xl mx-auto space-y-4">
 
         <ReferralBanner />
         
-        {/* Main Header */}
-        <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-6 rounded-3xl flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-2xl relative overflow-hidden">
-          <div className="space-y-1 z-10">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(52,211,153,0.8)]" />
-              <h1 className="text-2xl font-black bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent tracking-tight">
+        {/* 🌟 Compact Header */}
+        <div className="bg-slate-900/90 border border-slate-800 px-5 py-3 rounded-2xl flex flex-wrap justify-between items-center gap-3 shadow-xl">
+          <div className="flex items-center gap-3">
+            <img src="/icons/engine-hub.svg" alt="Hub" className="w-7 h-7 object-contain" />
+            <div>
+              <h1 className="text-lg font-black bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent leading-tight">
                 InboxSend Multi-Account Rotator
               </h1>
+              <p className="text-[10px] text-slate-400 font-mono">
+                Hardware Binding: <span className="text-indigo-400">{machineId || "Authenticating..."}</span>
+              </p>
             </div>
-            <p className="text-slate-400 text-xs font-medium">
-              Enterprise Multi-Channel Delivery Engine | Dynamic Queue Consumption & High-Priority Inbox Placement
-            </p>
           </div>
 
-          <button
-            type="button"
-            disabled={loading}
-            onClick={handleFullReset}
-            className="z-10 px-4 py-2 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold transition duration-200 disabled:opacity-40 cursor-pointer shadow-sm active:scale-95 flex items-center gap-1.5"
-          >
-            <span>🔄</span> Reset Campaign
-          </button>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/vault"
+              className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+            >
+              <span>🔐</span> Senders Vault
+            </Link>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={handleFullReset}
+              className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold transition cursor-pointer"
+            >
+              🔄 Reset
+            </button>
+          </div>
         </div>
 
-        {/* Realtime Statistics */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-slate-800/80 shadow-lg">
-            <p className="text-[10px] text-slate-400 uppercase font-black tracking-wider">Total Leads</p>
-            <p className="text-2xl font-black mt-1 text-slate-100 font-mono">{initialTotalCount}</p>
+        {/* 📊 Compact Unified Monitor Bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 bg-slate-900/90 border border-slate-800 p-3 rounded-2xl shadow-lg">
+          {/* Senders Track */}
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
+            <span className="text-[9px] text-slate-400 uppercase font-black block">Senders Loaded</span>
+            <p className="text-base font-black text-white font-mono">{totalAccountsCount}</p>
           </div>
-          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-indigo-500/20 shadow-lg">
-            <p className="text-[10px] text-indigo-400 uppercase font-black tracking-wider">Processed</p>
-            <p className="text-2xl font-black text-indigo-400 mt-1 font-mono">{processedCount}</p>
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-blue-500/20 text-center">
+            <span className="text-[9px] text-blue-400 uppercase font-black block">Turns Done</span>
+            <p className="text-base font-black text-blue-400 font-mono">{sendersUsedRounds}</p>
           </div>
-          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-emerald-500/20 shadow-lg">
-            <p className="text-[10px] text-emerald-400 uppercase font-black tracking-wider">Delivered</p>
-            <p className="text-2xl font-black text-emerald-400 mt-1 font-mono">{successCount}</p>
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-emerald-500/20 text-center">
+            <span className="text-[9px] text-emerald-400 uppercase font-black block">Current Turn</span>
+            <p className="text-base font-black text-emerald-400 font-mono">
+              #{totalAccountsCount > 0 ? (currentSenderIndex % totalAccountsCount) + 1 : 0}
+            </p>
           </div>
-          <div className="bg-slate-900/70 backdrop-blur-md p-4 rounded-2xl border border-amber-500/20 shadow-lg">
-            <p className="text-[10px] text-amber-400 uppercase font-black tracking-wider">In Queue</p>
-            <p className="text-2xl font-black text-amber-400 mt-1 font-mono">{remainingCount}</p>
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-indigo-500/20 text-center">
+            <span className="text-[9px] text-indigo-400 uppercase font-black block">Senders Queue</span>
+            <p className="text-base font-black text-indigo-400 font-mono">{remainingAccountsInQueue}</p>
+          </div>
+
+          {/* Leads Track */}
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
+            <span className="text-[9px] text-slate-400 uppercase font-black block">Total Leads</span>
+            <p className="text-base font-black text-slate-100 font-mono">{initialTotalCount}</p>
+          </div>
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-indigo-500/20 text-center">
+            <span className="text-[9px] text-indigo-400 uppercase font-black block">Processed</span>
+            <p className="text-base font-black text-indigo-400 font-mono">{processedCount}</p>
+          </div>
+          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-emerald-500/20 text-center">
+            <span className="text-[9px] text-emerald-400 uppercase font-black block">Delivered</span>
+            <p className="text-base font-black text-emerald-400 font-mono">{successCount}</p>
+          </div>
+          <div 
+            onClick={() => failedLeadsList.length > 0 && setShowFailedModal(true)}
+            className={`p-2.5 rounded-xl border text-center transition ${
+              failedLeadsList.length > 0 
+                ? "bg-rose-950/40 border-rose-500/40 cursor-pointer hover:border-rose-400 animate-pulse" 
+                : "bg-slate-950/80 border-slate-800 opacity-60"
+            }`}
+          >
+            <span className="text-[9px] text-rose-400 uppercase font-black block">
+              Failed {failedLeadsList.length > 0 && "👁️"}
+            </span>
+            <p className="text-base font-black text-rose-400 font-mono">{failedLeadsList.length}</p>
           </div>
         </div>
 
         {/* Progress Alert */}
         {loading && (
-          <div className="bg-indigo-950/40 border border-indigo-500/30 p-4 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
-            <div className="w-5 h-5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+          <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-2.5 rounded-2xl flex items-center gap-3 shadow-xl animate-pulse">
+            <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
             <p className="text-xs font-mono text-indigo-300 font-bold">{progressStatus}</p>
           </div>
         )}
 
         {lastBatchMessage && !loading && (
-          <div className="bg-emerald-950/30 border border-emerald-500/30 p-4 rounded-2xl flex items-center justify-between text-xs text-emerald-300 font-medium">
+          <div className="bg-emerald-950/30 border border-emerald-500/30 px-4 py-2.5 rounded-2xl flex items-center justify-between text-xs text-emerald-300 font-medium">
             <span>{lastBatchMessage}</span>
-            <button onClick={() => setLastBatchMessage("")} className="text-slate-400 hover:text-white text-xs">✕</button>
+            <button onClick={() => setLastBatchMessage("")} className="text-slate-400 hover:text-white text-xs cursor-pointer">✕</button>
           </div>
         )}
 
-        {/* STEP 1: INITIAL CAMPAIGN SETUP */}
+        {/* 🚀 TWO-COLUMN WORKSPACE (Matching 100% Equal Height on Desktop) */}
         {!isCampaignStarted ? (
-          <form onSubmit={handleStartCampaign} className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-6 sm:p-7 rounded-3xl space-y-5 shadow-2xl">
-            <div className="border-b border-slate-800 pb-3 flex items-center justify-between">
-              <h2 className="text-xs font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-indigo-400" />
-                Step 1: Setup Campaign & Target Queue
-              </h2>
-              <span className="text-[11px] text-slate-500 font-mono">Zero-Duplicate Engine</span>
-            </div>
-
-            {/* Row 1: Credentials */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Google Account ID</label>
-                <input
-                  type="email"
-                  required
-                  disabled={loading}
-                  value={senderEmail}
-                  onChange={(e) => setSenderEmail(e.target.value)}
-                  onBlur={(e) => setSenderEmail(e.target.value.trim().toLowerCase())}
-                  placeholder="account1@gmail.com"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1.5">App Password (16-digits)</label>
-                <input
-                  type="password"
-                  required
-                  disabled={loading}
-                  value={appPassword}
-                  onChange={(e) => setAppPassword(e.target.value)}
-                  onBlur={(e) => setAppPassword(e.target.value.replace(/\s+/g, ""))}
-                  placeholder="xxxx xxxx xxxx xxxx"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-amber-300 font-mono focus:border-indigo-500 outline-none transition"
-                />
-              </div>
-            </div>
-
-            {/* Row 2: Leads (Left) + Mode, Display Name & Batch Size (Right) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1.5">Target Leads (Paste Sheet Column - Unlimited)</label>
-                <textarea
-                  rows={9}
-                  required
-                  disabled={loading}
-                  value={rawSheetData}
-                  onChange={(e) => setRawSheetData(e.target.value)}
-                  placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3.5 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
-                />
-              </div>
-
-              <div className="space-y-3.5 flex flex-col justify-between">
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <label className="block text-xs font-bold text-indigo-300">Account Trust / Age Mode</label>
-                    <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
-                      {MODE_CONFIGS[accountAgeMode]?.badge}
-                    </span>
-                  </div>
-                  <select
-                    disabled={loading}
-                    value={accountAgeMode}
-                    onChange={(e) => {
-                      const newMode = e.target.value as AccountAgeMode;
-                      setAccountAgeMode(newMode);
-                      const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
-                      if (batchSize > maxLimit) {
-                        setBatchSize(maxLimit);
-                      }
-                    }}
-                    className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 focus:border-indigo-500 outline-none transition cursor-pointer"
-                  >
-                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads / Batch (8/Chunk)</option>
-                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads / Batch (6/Chunk)</option>
-                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads / Batch (4/Chunk)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Header Display Name</label>
-                  <input
-                    type="text"
-                    required
-                    disabled={loading}
-                    value={senderName}
-                    onChange={(e) => setSenderName(e.target.value)}
-                    onBlur={(e) => setSenderName(e.target.value.trim())}
-                    placeholder="e.g. Sales Team / Your Name"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
-                  />
-                </div>
-
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <label className="block text-xs font-bold text-slate-300">Batch Size</label>
-                    <span className="text-[10px] text-slate-400 font-mono">Max: {currentMaxLot}</span>
-                  </div>
-                  <input
-                    type="number"
-                    min={MIN_ALLOWED_BATCH_SIZE}
-                    max={currentMaxLot}
-                    required
-                    disabled={loading}
-                    value={batchSize || ""}
-                    onChange={(e) => handleBatchSizeChange(e.target.value)}
-                    onBlur={handleBatchSizeBlur}
-                    placeholder={String(DEFAULT_BATCH_SIZE)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-indigo-400 font-black focus:border-indigo-500 outline-none transition [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                  />
-                </div>
-              </div>
-            </div>
-
-            {/* Row 3: Subject */}
-            <div className="w-full">
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">Subject Line</label>
-              <input
-                type="text"
-                required
-                disabled={loading}
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                onBlur={(e) => setSubject(e.target.value.trim())}
-                placeholder="e.g. Quick question regarding project inquiry"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-indigo-500 outline-none transition"
-              />
-            </div>
-
-            {/* Row 4: Message Body */}
-            <div className="w-full">
-              <label className="block text-xs font-bold text-slate-300 mb-1.5">Email Body Template</label>
-              <textarea
-                rows={6}
-                required
-                disabled={loading}
-                value={template}
-                onChange={(e) => setTemplate(e.target.value)}
-                placeholder="Type your outreach message here..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-sm text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none transition"
-              />
-            </div>
-
-            {/* Row 5: Custom Signoff / Footer Block */}
-            <div className="w-full bg-slate-950/60 p-4 rounded-2xl border border-slate-800/80">
-              <label className="block text-xs font-bold text-emerald-400 mb-1.5">
-                Custom Footer & Signature Details (Name, Company, Brand)
-              </label>
-              <input
-                type="text"
-                disabled={loading}
-                value={customSignoffName}
-                onChange={(e) => setCustomSignoffName(e.target.value)}
-                onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
-                placeholder="e.g. John Doe | Founder at Acme Corp"
-                className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:border-emerald-500 outline-none font-bold transition"
-              />
-              <p className="text-[11px] text-slate-400 mt-1.5">
-                Leave empty to fallback automatically to Sender Display Name.
-              </p>
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-2xl text-sm transition shadow-xl disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
-            >
-              {loading ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  <span>Dispatching Batch 1...</span>
-                </>
-              ) : (
-                `🚀 Launch Campaign & Send Batch 1 (${Math.min(batchSize || DEFAULT_BATCH_SIZE, currentMaxLot)} Leads)`
-              )}
-            </button>
-          </form>
-        ) : (
-          /* STEP 2: BATCH ROTATION DASHBOARD */
-          <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 p-6 sm:p-7 rounded-3xl space-y-5 shadow-2xl">
-            {remainingCount > 0 ? (
-              <form onSubmit={handleNextBatch} className="space-y-4 bg-slate-950/80 border border-slate-800/90 p-5 rounded-2xl">
-                <div className="border-b border-slate-800 pb-3 flex justify-between items-center">
-                  <h3 className="text-sm font-black text-indigo-400 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
-                    Next Batch: {currentBatchTarget} Pending Leads Ready
-                  </h3>
-                  <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-1 rounded-full border border-amber-500/20">
-                    Remaining in Queue: {remainingCount}
+          <form onSubmit={handleStartCampaign} className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+            
+            {/* ⬅️ LEFT COLUMN: AGE PROFILE, CREDENTIALS & LEADS BOX (col-span-5) */}
+            <div className="lg:col-span-5 flex flex-col justify-between gap-3">
+              
+              {/* 1. Age Profile Pills */}
+              <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg">
+                <div className="flex justify-between items-center">
+                  <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                    <span>📅</span> 1. Select Age Group:
                   </span>
+                  {isVaultLoaded && (
+                    <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
+                      ✓ {inMemorySenders.length} Loaded
+                    </span>
+                  )}
                 </div>
 
-                {/* Mode Selector */}
+                <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+                  {(Object.keys(TIER_META) as ProfileTier[]).map((tier) => {
+                    const meta = TIER_META[tier];
+                    const isSelected = selectedTier === tier;
+                    return (
+                      <button
+                        key={tier}
+                        type="button"
+                        disabled={loading}
+                        onClick={() => handleLoadTierAccounts(tier)}
+                        className={`py-1.5 px-1 rounded-xl border text-[10px] font-bold transition flex flex-col items-center justify-center cursor-pointer ${
+                          isSelected
+                            ? `${meta.color} shadow-md scale-105`
+                            : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                        }`}
+                      >
+                        <span>{meta.badge}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 2. Senders Credentials */}
+              <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2.5 shadow-lg">
                 <div>
-                  <label className="block text-xs font-bold text-indigo-300 mb-1.5">Account Trust / Age Mode</label>
-                  <select
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">Active Sender Gmail</label>
+                  <input
+                    type="email"
+                    required
                     disabled={loading}
-                    value={accountAgeMode}
-                    onChange={(e) => {
-                      const newMode = e.target.value as AccountAgeMode;
-                      setAccountAgeMode(newMode);
-                      const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
-                      if (batchSize > maxLimit) {
-                        setBatchSize(maxLimit);
-                      }
-                    }}
-                    className="w-full bg-slate-900 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
-                  >
-                    <option value="AGED">🟢 Aged Account (2+ Years) - Max 100 Leads / Batch (8/Chunk)</option>
-                    <option value="STANDARD">🟡 Standard Account (6 Mo - 2 Yrs) - Max 50 Leads / Batch (6/Chunk)</option>
-                    <option value="FRESH">🔴 Fresh Account (&lt; 6 Months) - Max 30 Leads / Batch (4/Chunk)</option>
-                  </select>
+                    value={senderEmail}
+                    onChange={(e) => setSenderEmail(e.target.value)}
+                    placeholder="account1@gmail.com"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500 font-mono"
+                  />
                 </div>
 
-                {/* Account Switch Inputs */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1.5">New Sender Account (Rotate Now)</label>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="text-[11px] font-bold text-slate-300">App Password</label>
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                      >
+                        {showPassword ? "🙈 Hide" : "👁️ Show"}
+                      </button>
+                    </div>
                     <input
-                      type="email"
-                      required
-                      disabled={loading}
-                      value={senderEmail}
-                      onChange={(e) => setSenderEmail(e.target.value)}
-                      onBlur={(e) => setSenderEmail(e.target.value.trim().toLowerCase())}
-                      placeholder="account2@gmail.com"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1.5">New App Password (Rotate Now)</label>
-                    <input
-                      type="password"
+                      type={showPassword ? "text" : "password"}
                       required
                       disabled={loading}
                       value={appPassword}
                       onChange={(e) => setAppPassword(e.target.value)}
-                      onBlur={(e) => setAppPassword(e.target.value.replace(/\s+/g, ""))}
                       placeholder="xxxx xxxx xxxx xxxx"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-amber-300 font-mono outline-none focus:border-indigo-500"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
                     />
                   </div>
-                </div>
 
-                {/* Batch Config Controls */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1.5">Sender Display Name</label>
+                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Display Name</label>
                     <input
                       type="text"
                       required
                       disabled={loading}
                       value={senderName}
                       onChange={(e) => setSenderName(e.target.value)}
-                      onBlur={(e) => setSenderName(e.target.value.trim())}
-                      placeholder="e.g. Sales Lead / Support"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
+                      placeholder="e.g. Sales Lead"
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
                     />
                   </div>
+                </div>
+              </div>
+
+              {/* 3. Target Leads Box + Auto Clean (🔥 Flex-1 & H-Full to Match Right Column Exactly) */}
+              <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg flex-1 flex flex-col">
+                <div className="flex justify-between items-center">
+                  <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                    <img src="/icons/target-lead.svg" alt="Target" className="w-3.5 h-3.5 object-contain" />
+                    Target Leads Box
+                  </label>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={handleAutoCleanLeads}
+                      className="px-2.5 py-0.5 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                    >
+                      ✨ Auto Clean
+                    </button>
+                    {rejectedData.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowRejectedModal(true)}
+                        className="px-2 py-0.5 bg-rose-500/20 text-rose-300 border border-rose-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
+                      >
+                        ⚠️ Rejected ({rejectedData.length})
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 🔍 Auto Expands to fit remaining height perfectly */}
+                <textarea
+                  required
+                  disabled={loading}
+                  value={rawSheetData}
+                  onChange={(e) => setRawSheetData(e.target.value)}
+                  placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com"
+                  className="w-full flex-1 min-h-[300px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
+                />
+              </div>
+
+            </div>
+
+            {/* ➡️ RIGHT COLUMN: MODE, BATCH SIZE, TEMPLATE, SIGNOFF & CTA (col-span-7) */}
+            <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col justify-between">
+              
+              <div className="space-y-3">
+                {/* Row 1: Mode Selector & Batch Size */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-xs font-bold text-slate-300 mb-1.5">Batch Size</label>
+                    <label className="text-[11px] font-bold text-indigo-300 block mb-1">Account Mode</label>
+                    <select
+                      disabled={loading}
+                      value={accountAgeMode}
+                      onChange={(e) => {
+                        const newMode = e.target.value as AccountAgeMode;
+                        setAccountAgeMode(newMode);
+                        const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
+                        if (batchSize > maxLimit) setBatchSize(maxLimit);
+                      }}
+                      className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
+                    >
+                      <option value="AGED">🟢 Aged (2+ Yrs) - Max 100</option>
+                      <option value="STANDARD">🟡 Standard (6 Mo-2 Yrs) - Max 50</option>
+                      <option value="FRESH">🔴 Fresh (&lt;6 Mo) - Max 30</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Batch Size per Sender Turn</label>
                     <input
                       type="number"
                       min={MIN_ALLOWED_BATCH_SIZE}
@@ -790,57 +939,154 @@ export default function Home() {
                       value={batchSize || ""}
                       onChange={(e) => handleBatchSizeChange(e.target.value)}
                       onBlur={handleBatchSizeBlur}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-indigo-400 font-bold outline-none focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                      placeholder={String(DEFAULT_BATCH_SIZE)}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-indigo-400 font-black outline-none focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                     />
                   </div>
                 </div>
 
-                {/* Subject Line */}
-                <div className="w-full">
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">Subject Line</label>
+                {/* Row 2: Subject Line */}
+                <div>
+                  <label className="text-[11px] font-bold text-slate-300 block mb-1">Subject Line</label>
                   <input
                     type="text"
                     required
                     disabled={loading}
                     value={subject}
                     onChange={(e) => setSubject(e.target.value)}
-                    onBlur={(e) => setSubject(e.target.value.trim())}
-                    placeholder="e.g. Quick question regarding partnership / inquiry"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-500"
+                    placeholder="e.g. Quick question regarding partnership"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 outline-none"
                   />
                 </div>
 
-                {/* Message Body */}
-                <div className="w-full">
-                  <label className="block text-xs font-bold text-slate-300 mb-1.5">Message Body</label>
+                {/* Row 3: Email Body Template */}
+                <div className="space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                      <img src="/icons/copy-clipboard.svg" alt="Body" className="w-3 h-3 object-contain opacity-70" />
+                      Email Body Template
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleGenerateSpintaxPreviews}
+                      className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
+                    >
+                      👁️ Spintax Preview (4 Samples)
+                    </button>
+                  </div>
+
                   <textarea
-                    rows={4}
+                    rows={13}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-4 text-sm text-slate-100 outline-none leading-relaxed resize-none focus:border-indigo-500"
+                    placeholder="Type your outreach message here... Automatic Greetings, Openers & Signoffs are appended per recipient."
+                    className="w-full min-h-[290px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
                   />
                 </div>
 
-                {/* Sign-off Footer / Signature */}
-                <div className="w-full">
-                  <label className="block text-xs font-bold text-emerald-400 mb-1.5">Custom Footer & Signature Details (Name, Company, Brand)</label>
+                {/* Row 4: Custom Signoff Footer */}
+                <div>
+                  <label className="text-[11px] font-bold text-emerald-400 block mb-1">Custom Signature & Signoff Details</label>
                   <input
                     type="text"
                     disabled={loading}
                     value={customSignoffName}
                     onChange={(e) => setCustomSignoffName(e.target.value)}
-                    onBlur={(e) => setCustomSignoffName(e.target.value.trim())}
-                    placeholder="e.g. John Doe | Founder at Acme Corp"
-                    className="w-full bg-slate-900 border border-emerald-500/30 rounded-xl px-4 py-2 text-sm text-slate-100 outline-none font-semibold focus:border-emerald-500"
+                    placeholder="e.g. John Doe | Founder at Acme Corp (Optional)"
+                    className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3 py-1.5 text-xs text-slate-100 focus:border-emerald-500 outline-none"
                   />
+                </div>
+              </div>
+
+              {/* Launch Campaign CTA (Aligned perfectly at the bottom) */}
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-xl text-xs sm:text-sm transition shadow-xl disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99] mt-3"
+              >
+                {loading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>Dispatching Batch 1...</span>
+                  </>
+                ) : (
+                  <>
+                    <img src="/icons/gmail.svg" alt="Send" className="w-4 h-4 object-contain" />
+                    <span>🚀 Launch Campaign & Send Batch 1 ({Math.min(batchSize || DEFAULT_BATCH_SIZE, currentMaxLot)} Leads)</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+          </form>
+        ) : (
+          /* STEP 2: IN-MEMORY AUTO-ROTATION DASHBOARD */
+          <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
+            {remainingCount > 0 ? (
+              <form onSubmit={handleNextBatch} className="space-y-3 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
+                <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+                  <h3 className="text-xs font-black text-indigo-400 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
+                    Next Batch: {currentBatchTarget} Pending Leads Ready
+                  </h3>
+                  <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
+                    Remaining in Queue: {remainingCount}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-0.5">Active Sender Gmail</label>
+                    <input
+                      type="email"
+                      required
+                      disabled={loading}
+                      value={senderEmail}
+                      onChange={(e) => setSenderEmail(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white font-mono outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between items-center mb-0.5">
+                      <label className="text-[10px] text-slate-400">App Password</label>
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="text-[9px] text-slate-400 hover:text-white cursor-pointer"
+                      >
+                        {showPassword ? "🙈 Hide" : "👁️ Show"}
+                      </button>
+                    </div>
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      required
+                      disabled={loading}
+                      value={appPassword}
+                      onChange={(e) => setAppPassword(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] text-slate-400 block mb-0.5">Sender Display Name</label>
+                    <input
+                      type="text"
+                      required
+                      disabled={loading}
+                      value={senderName}
+                      onChange={(e) => setSenderName(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+                    />
+                  </div>
                 </div>
 
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-2xl text-sm transition-all duration-300 shadow-xl hover:shadow-indigo-500/25 disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
+                  className="w-full py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-xl text-xs sm:text-sm transition-all duration-300 shadow-xl disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
                 >
                   {loading ? (
                     <>
@@ -848,19 +1094,102 @@ export default function Home() {
                       <span>Dispatching Next Batch...</span>
                     </>
                   ) : (
-                    `▶ Dispatch Next Batch (${currentBatchTarget} Leads)`
+                    <>
+                      <img src="/icons/gmail.svg" alt="Send" className="w-4 h-4 object-contain" />
+                      <span>Dispatch Next Batch ({currentBatchTarget} Leads)</span>
+                    </>
                   )}
                 </button>
               </form>
             ) : (
-              <div className="p-6 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-2xl font-bold text-sm shadow-inner flex items-center justify-center gap-2">
-                <span>🎉</span> All {initialTotalCount} leads have been processed, delivered, and cleared from the queue!
+              <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-xl font-bold text-xs shadow-inner flex items-center justify-center gap-2">
+                <img src="/icons/sparkle-star.svg" alt="Done" className="w-4 h-4 object-contain" />
+                All {initialTotalCount} leads have been processed, delivered, and cleared from the queue!
               </div>
             )}
           </div>
         )}
 
       </div>
+
+      {/* 🛡️ Rejected Leads Audit Modal */}
+      <RejectedLeadsModal
+        isOpen={showRejectedModal}
+        onClose={() => setShowRejectedModal(false)}
+        rejectedData={rejectedData}
+        stats={rejectedStats}
+      />
+
+      {/* 🔴 Live Delivery Failed Leads Modal (with 1-Click Copy Detailed Log & Emails) */}
+      {showFailedModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className="bg-slate-900 border border-rose-500/40 w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-black text-rose-400 uppercase tracking-wider flex items-center gap-2">
+                  <span>🔴</span> Delivery Failed Leads ({failedLeadsList.length})
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  These emails could not be delivered by the SMTP provider.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowFailedModal(false)}
+                className="text-slate-400 hover:text-white text-sm bg-slate-800 px-2.5 py-1 rounded-lg cursor-pointer"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            {/* 🎯 1-Click Copy Buttons Bar */}
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <span className="text-[11px] text-slate-400 font-mono">Export / Clipboard Actions:</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopyFailedEmailsOnly}
+                  className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+                >
+                  <span>📧</span>
+                  <span>{copiedType === "EMAILS" ? "✓ Emails Copied!" : "Copy Emails Only"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopyFailedDetailed}
+                  className="px-3 py-1 bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 border border-rose-500/50 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+                >
+                  <span>📋</span>
+                  <span>{copiedType === "DETAILED" ? "✓ Full Log Copied!" : "Copy All (Detailed Log)"}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Failed Leads Cards List */}
+            <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
+              {failedLeadsList.map((item, idx) => (
+                <div key={idx} className="bg-slate-950 p-3 rounded-xl border border-rose-950/80 flex flex-col sm:flex-row justify-between sm:items-center gap-1 text-xs">
+                  <div>
+                    <span className="font-bold text-white">{item.email}</span>
+                    <p className="text-[10px] text-rose-400 font-mono mt-0.5">{item.reason}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] text-slate-400 font-mono">Via: {item.senderUsed}</span>
+                    <p className="text-[9px] text-slate-500 font-mono">{item.time}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 🎲 Spintax Live Variations Modal */}
+      <SpintaxPreviewModal
+        isOpen={showPreviewModal}
+        onClose={() => setShowPreviewModal(false)}
+        samples={previewSamples}
+        onReRoll={handleGenerateSpintaxPreviews}
+      />
     </main>
   );
 }

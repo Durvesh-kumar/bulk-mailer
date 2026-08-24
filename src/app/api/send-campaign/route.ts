@@ -96,13 +96,24 @@ export async function POST(req: Request) {
     try {
       await transporter.verify();
     } catch (authErr: any) {
+      const isAuthError = authErr.code === "EAUTH" || authErr.responseCode === 535;
       return NextResponse.json(
-        { error: "Authentication failed. Check your Gmail ID or 16-digit App Password." },
-        { status: 401 }
+        {
+          error: "Authentication failed. Check your Gmail ID or 16-digit App Password.",
+          accountError: true,
+          accountErrorType: isAuthError ? "AUTH_FAILED" : "CONNECTION_FAILED",
+          report: recipients.map((email: string) => ({
+            email,
+            status: "FAILED",
+            error: "Authentication / Connection Failed",
+          })),
+        },
+        { status: 400 }
       );
     }
 
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
+    let isQuotaHit = false;
 
     // यूजर के टेम्पलेट से डुप्लिकेट ग्रीटिंग/ओपनर लाइन्स को सुरक्षित रूप से क्लीन करना
     const cleanUserBody = template
@@ -116,6 +127,11 @@ export async function POST(req: Request) {
 
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
+
+      // अगर कोटा लिमिट हिट हो गई, तो बाकी बची लीड्स को वेस्ट किए बिना तुरंत ब्रेक करना
+      if (isQuotaHit) {
+        break;
+      }
 
       const randomGreeting = pickRandom(GREETINGS);
       const randomOpener = pickRandom(OPENERS);
@@ -138,11 +154,22 @@ export async function POST(req: Request) {
           await sleepRandom(rule.minDelay, rule.maxDelay);
         }
       } catch (err: any) {
+        const errMessage = err.message || "";
+        const isQuotaErr =
+          errMessage.includes("5.4.5") ||
+          errMessage.toLowerCase().includes("quota") ||
+          errMessage.toLowerCase().includes("limit");
+
         logs.push({
           email: recipientEmail,
           status: "FAILED",
-          error: "Failed to send: " + err.message,
+          error: "Failed to send: " + errMessage,
         });
+
+        if (isQuotaErr) {
+          isQuotaHit = true;
+          break;
+        }
       }
     }
 
@@ -152,6 +179,8 @@ export async function POST(req: Request) {
       report: logs,
       sessionToken: guard.sessionToken,
       modeApplied: selectedMode,
+      accountError: isQuotaHit,
+      accountErrorType: isQuotaHit ? "QUOTA_EXCEEDED" : null,
     });
   } catch (error: any) {
     return NextResponse.json(
