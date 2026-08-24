@@ -13,6 +13,7 @@ on:
           - personal
           - manish
           - amit
+          - test
 
 jobs:
   # -------------------------------------------------------------
@@ -154,4 +155,39 @@ jobs:
             --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
             --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
             --name=inboxsend-amit \
+            --yes
+    # -------------------------------------------------------------
+  # 4. DEPLOY TO AMIT VERCEL (सिर्फ तभी चलेगा जब बिल्ड पास होगा)
+  # -------------------------------------------------------------
+  deploy-test:
+    name: Deploy to Test Account
+    needs: [build-check]
+    if: ${{ github.event.inputs.target_account == 'test' || github.event.inputs.target_account == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Inject Secure Environment Variables
+        run: |
+          cat <<EOF > .env.production
+          NODE_ENV=production
+          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          EOF
+
+      - name: Deploy to Test Vercel
+        run: |
+          vercel --prod \
+            --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
+            --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
+            --name=inboxsend-test \
             --yes

@@ -76,6 +76,10 @@ export default function Home() {
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
+  // 🎛️ Template & Subject Rotation Control State
+  const [rotationMode, setRotationMode] = useState<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
+  const [pauseAfterNSenders, setPauseAfterNSenders] = useState<number>(2);
+
   // Leads Queue & Progress State
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
@@ -575,6 +579,20 @@ export default function Home() {
           setIsCampaignStarted(false);
           setRawSheetData("");
         }
+
+        // 🎛️ 3. Template & Subject Rotation Pause Check
+        if (remainingQueue.length > 0) {
+          let shouldPause = false;
+          if (rotationMode === "EVERY_SINGLE_SENDER") {
+            shouldPause = true;
+          } else if (rotationMode === "EVERY_N_SENDERS" && updatedRounds % pauseAfterNSenders === 0) {
+            shouldPause = true;
+          }
+
+          if (shouldPause) {
+            alert(`⏸️ [Rotation Pause Triggered]\nSender [${activeEmail}] completed its turn.\nPlease update your Subject and Email Template before sending the next batch!`);
+          }
+        }
       }
     } catch {
       alert("Network error. Please check your connection.");
@@ -945,6 +963,58 @@ export default function Home() {
                   </div>
                 </div>
 
+                {/* 🎛️ Template & Subject Rotation Control Panel */}
+                <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
+                  <label className="text-[11px] font-bold text-indigo-300 block">
+                    🔄 Template & Subject Rotation Control:
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                    <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "CONTINUOUS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
+                      <input 
+                        type="radio" 
+                        name="rotationModeOption" 
+                        checked={rotationMode === "CONTINUOUS"} 
+                        onChange={() => setRotationMode("CONTINUOUS")} 
+                      />
+                      <span>Continuous (No Stop)</span>
+                    </label>
+                    
+                    <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_N_SENDERS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
+                      <input 
+                        type="radio" 
+                        name="rotationModeOption" 
+                        checked={rotationMode === "EVERY_N_SENDERS"} 
+                        onChange={() => setRotationMode("EVERY_N_SENDERS")} 
+                      />
+                      <span>Pause after N Senders</span>
+                    </label>
+
+                    <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_SINGLE_SENDER" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
+                      <input 
+                        type="radio" 
+                        name="rotationModeOption" 
+                        checked={rotationMode === "EVERY_SINGLE_SENDER"} 
+                        onChange={() => setRotationMode("EVERY_SINGLE_SENDER")} 
+                      />
+                      <span>Pause Every Sender Turn</span>
+                    </label>
+                  </div>
+
+                  {rotationMode === "EVERY_N_SENDERS" && (
+                    <div className="pt-2 flex items-center gap-3">
+                      <span className="text-[11px] text-slate-300">Pause after how many senders?</span>
+                      <input 
+                        type="number" 
+                        min={1} 
+                        max={totalAccountsCount || 10} 
+                        value={pauseAfterNSenders}
+                        onChange={(e) => setPauseAfterNSenders(parseInt(e.target.value) || 1)}
+                        className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center"
+                      />
+                    </div>
+                  )}
+                </div>
+
                 {/* Row 2: Subject Line */}
                 <div>
                   <label className="text-[11px] font-bold text-slate-300 block mb-1">Subject Line</label>
@@ -976,13 +1046,13 @@ export default function Home() {
                   </div>
 
                   <textarea
-                    rows={13}
+                    rows={11}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
                     placeholder="Type your outreach message here... Automatic Greetings, Openers & Signoffs are appended per recipient."
-                    className="w-full min-h-[290px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
+                    className="w-full min-h-[230px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
                   />
                 </div>
 
