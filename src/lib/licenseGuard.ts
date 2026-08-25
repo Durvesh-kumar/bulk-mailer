@@ -4,8 +4,9 @@ import { connectToCentralDB } from "./db/centralDb";
 import { getLicenseModel } from "@/lib/models/License";
 
 const JWT_SECRET: string = process.env.JWT_SECRET_KEY || (() => {
-  throw new Error("JWT_SECRET_KEY is missing in environment variables!.");
+  throw new Error("JWT_SECRET_KEY is missing in environment variables!");
 })();
+
 export const ENABLE_DEVICE_LOCK = true;
 
 export function cleanAppDomain(input: string): string {
@@ -41,7 +42,7 @@ export async function verifyLicenseAndDevice(
   const appDomain = cleanAppDomain(rawAppDomain);
   let effectiveMachineId = machineId ? machineId.trim() : "";
 
-  // 🛡️ 12-घंटे का टोकन चेक (अगर टोकन वैलिड है तो बिना सेंट्रल DB छुए तुरंत रिटर्न)
+  // 🛡️ 12-घंटे का टोकन चेक (अगर टोकन वैलिड है और मशीन मैच है)
   if (sessionToken && sessionToken !== "SECURE_AUTH") {
     try {
       const decoded: any = jwt.verify(sessionToken, JWT_SECRET);
@@ -51,16 +52,19 @@ export async function verifyLicenseAndDevice(
         }
 
         if (decoded.machineId === effectiveMachineId) {
+          const resolvedId = String(decoded.userId || decoded.licenseId || appDomain);
           return { 
             ok: true, 
             reason: "ACTIVE", 
             sessionToken, 
-            machineId: effectiveMachineId 
+            machineId: effectiveMachineId,
+            userId: resolvedId,
+            licenseId: resolvedId
           };
         }
       }
     } catch (e) {
-      // टोकन एक्सपायर होने पर नीचे सेंट्रल DB चेक पर जाएगा
+      // टोकन अमान्य या एक्सपायर होने पर नीचे सेंट्रल DB चेक पर जाएगा
     }
   }
 
@@ -106,8 +110,8 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // हार्डवेयर बाइंडिंग
-    if (!license.lockedDeviceId) {
+    // 🔒 हार्डवेयर बाइंडिंग (अगर खाली है तो तुरंत लॉक करें)
+    if (!license.lockedDeviceId || license.lockedDeviceId.trim() === "") {
       license.lockedDeviceId = effectiveMachineId;
       license.lastBoundAt = new Date();
       await license.save();
@@ -121,9 +125,16 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // नया 12-घंटे का JWT टोकन
+    const resolvedUserId = String(license._id);
+
+    // 🎯 नया 12-घंटे का JWT टोकन (पेलोड में userId और licenseId जोड़ दिया)
     const newSessionToken = jwt.sign(
-      { domain: appDomain, machineId: effectiveMachineId },
+      { 
+        domain: appDomain, 
+        machineId: effectiveMachineId,
+        userId: resolvedUserId,
+        licenseId: resolvedUserId 
+      },
       JWT_SECRET,
       { expiresIn: "12h" }
     );
@@ -133,6 +144,8 @@ export async function verifyLicenseAndDevice(
       reason: "ACTIVE", 
       sessionToken: newSessionToken, 
       machineId: effectiveMachineId,
+      userId: resolvedUserId,
+      licenseId: resolvedUserId,
       expiryDate: formattedExpiry 
     };
 
