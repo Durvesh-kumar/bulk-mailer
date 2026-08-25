@@ -24,6 +24,8 @@ export interface GuardResult {
   ok: boolean;
   reason?: "NEW_DEVICE" | "SUSPENDED" | "EXPIRED" | "ACTIVE" | "DB_ERROR";
   expiryDate?: string;
+  userId?: string;
+  licenseId?: string;
   error?: string;
   sessionToken?: string;
   clearClientSession?: boolean;
