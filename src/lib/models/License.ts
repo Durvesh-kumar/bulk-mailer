@@ -1,18 +1,19 @@
-import mongoose, { Schema, Document, models, model } from "mongoose";
+// src/lib/models/License.ts
+import mongoose, { Schema, Document, Model, Connection, models, model } from "mongoose";
 
 export interface ILicense extends Document {
   clientName: string;
-  appDomain: string;              // सिर्फ और सिर्फ App Domain
-  lockedDeviceId: string | null;  // यूजर के लैपटॉप का फिंगरप्रिंट
+  appDomain: string;
+  lockedDeviceId: string | null;
   status: "ACTIVE" | "SUSPENDED";
-  expiresAt: Date;                // 365 दिन की एक्सपायरी
+  expiresAt: Date;
   lastBoundAt?: Date;
   lastResetAt?: Date;
   createdAt: Date;
-  updatedAt: Date;
+  updatedAt: Date;  
 }
 
-const LicenseSchema = new Schema<ILicense>(
+export const LicenseSchema = new Schema<ILicense>(
   {
     clientName: {
       type: String,
@@ -49,8 +50,13 @@ const LicenseSchema = new Schema<ILicense>(
   { timestamps: true }
 );
 
-if (models.License) {
-  delete (models as any).License;
+export function getLicenseModel(conn?: Connection | typeof mongoose): Model<ILicense> {
+  const target = conn || mongoose;
+  if (target.models && target.models.License) {
+    return target.models.License as Model<ILicense>;
+  }
+  return target.model("License", LicenseSchema) as Model<ILicense>;
 }
 
-export const LicenseModel = model<ILicense>("License", LicenseSchema);
+export const LicenseModel: Model<ILicense> =
+  models.License || model<ILicense>("License", LicenseSchema);

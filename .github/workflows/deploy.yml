@@ -43,6 +43,9 @@ jobs:
           ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
           ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
           MONGODB_URI=${{ secrets.MONGODB_URI }}
+          MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
+          DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           EOF
 
       - name: Run Next.js Production Build
@@ -75,6 +78,9 @@ jobs:
           ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
           ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
           MONGODB_URI=${{ secrets.MONGODB_URI }}
+          MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
+          DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           EOF
 
       - name: Deploy to Personal Vercel
@@ -111,6 +117,9 @@ jobs:
           NODE_ENV=production
           ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
           MONGODB_URI=${{ secrets.MONGODB_URI }}
+          MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
+          DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           EOF
 
       - name: Deploy to Manish Vercel
@@ -147,6 +156,9 @@ jobs:
           NODE_ENV=production
           ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
           MONGODB_URI=${{ secrets.MONGODB_URI }}
+          MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
+          DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           EOF
 
       - name: Deploy to Amit Vercel
@@ -182,6 +194,9 @@ jobs:
           NODE_ENV=production
           ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
           MONGODB_URI=${{ secrets.MONGODB_URI }}
+          MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
+          DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
+          JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           EOF
 
       - name: Deploy to Test Vercel

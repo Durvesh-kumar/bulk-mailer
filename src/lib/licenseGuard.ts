@@ -1,6 +1,11 @@
-import { connectToDatabase } from "@/lib/db";
-import { LicenseModel } from "@/lib/models/License";
+// src/lib/licenseGuard.ts
+import jwt from "jsonwebtoken";
+import { connectToCentralDB } from "./db/centralDb";
+import { getLicenseModel } from "@/lib/models/License";
 
+const JWT_SECRET: string = process.env.JWT_SECRET_KEY || (() => {
+  throw new Error("JWT_SECRET_KEY is missing in environment variables!.");
+})();
 export const ENABLE_DEVICE_LOCK = true;
 
 export function cleanAppDomain(input: string): string {
@@ -15,6 +20,7 @@ export function cleanAppDomain(input: string): string {
 }
 
 export interface GuardResult {
+  machineId?: string;
   ok: boolean;
   reason?: "NEW_DEVICE" | "SUSPENDED" | "EXPIRED" | "ACTIVE" | "DB_ERROR";
   expiryDate?: string;
@@ -25,22 +31,46 @@ export interface GuardResult {
 
 export async function verifyLicenseAndDevice(
   rawAppDomain: string,
-  machineId?: string,
-  sessionToken?: string
+  machineId?: string | null,
+  sessionToken?: string | null
 ): Promise<GuardResult> {
-  if (!ENABLE_DEVICE_LOCK) return { ok: true, reason: "ACTIVE" };
-
-  if (!machineId) {
-    return { ok: false, reason: "NEW_DEVICE", error: "Machine fingerprint missing." };
-  }
+  if (!ENABLE_DEVICE_LOCK) return { ok: true, reason: "ACTIVE", machineId: machineId || undefined };
 
   const appDomain = cleanAppDomain(rawAppDomain);
+  let effectiveMachineId = machineId ? machineId.trim() : "";
+
+  // 🛡️ 12-घंटे का टोकन चेक (अगर टोकन वैलिड है तो बिना सेंट्रल DB छुए तुरंत रिटर्न)
+  if (sessionToken && sessionToken !== "SECURE_AUTH") {
+    try {
+      const decoded: any = jwt.verify(sessionToken, JWT_SECRET);
+      if (decoded && decoded.domain === appDomain) {
+        if (!effectiveMachineId && decoded.machineId) {
+          effectiveMachineId = decoded.machineId;
+        }
+
+        if (decoded.machineId === effectiveMachineId) {
+          return { 
+            ok: true, 
+            reason: "ACTIVE", 
+            sessionToken, 
+            machineId: effectiveMachineId 
+          };
+        }
+      }
+    } catch (e) {
+      // टोकन एक्सपायर होने पर नीचे सेंट्रल DB चेक पर जाएगा
+    }
+  }
+
+  if (!effectiveMachineId) {
+    return { ok: false, reason: "NEW_DEVICE", error: "Hardware fingerprint missing." };
+  }
 
   try {
-    await connectToDatabase();
-    const license = await LicenseModel.findOne({ appDomain });
+    const centralConn = await connectToCentralDB();
+    const License = getLicenseModel(centralConn);
+    const license = await License.findOne({ appDomain });
 
-    // 1️⃣ डोमेन डेटाबेस में नहीं है
     if (!license) {
       return {
         ok: false,
@@ -54,7 +84,6 @@ export async function verifyLicenseAndDevice(
       ? new Date(license.expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
       : "N/A";
 
-    // 2️⃣ एक्सपायर हो चुका है
     if (license.expiresAt && new Date() > new Date(license.expiresAt)) {
       return {
         ok: false,
@@ -65,7 +94,6 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // 3️⃣ सस्पेंड है
     if (license.status !== "ACTIVE") {
       return {
         ok: false,
@@ -76,17 +104,12 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // 4️⃣ पहली बार: Unbound है तो इसी मशीन को लॉक कर दो
+    // हार्डवेयर बाइंडिंग
     if (!license.lockedDeviceId) {
-      license.lockedDeviceId = machineId;
+      license.lockedDeviceId = effectiveMachineId;
       license.lastBoundAt = new Date();
       await license.save();
-
-      return { ok: true, reason: "ACTIVE", sessionToken: "SECURE_AUTH", expiryDate: formattedExpiry };
-    }
-
-    // 5️⃣ दूसरी बार: अगर कोई नया डिवाइस है तो ब्लॉक करो
-    if (license.lockedDeviceId !== machineId) {
+    } else if (license.lockedDeviceId !== effectiveMachineId) {
       return {
         ok: false,
         reason: "NEW_DEVICE",
@@ -96,10 +119,23 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // ✅ मशीन सही है -> डायरेक्ट अंदर जाने दो
-    return { ok: true, reason: "ACTIVE", sessionToken: "SECURE_AUTH", expiryDate: formattedExpiry };
+    // नया 12-घंटे का JWT टोकन
+    const newSessionToken = jwt.sign(
+      { domain: appDomain, machineId: effectiveMachineId },
+      JWT_SECRET,
+      { expiresIn: "12h" }
+    );
+
+    return { 
+      ok: true, 
+      reason: "ACTIVE", 
+      sessionToken: newSessionToken, 
+      machineId: effectiveMachineId,
+      expiryDate: formattedExpiry 
+    };
 
   } catch (err: any) {
+    console.error("Central DB License Check Failed:", err);
     return { ok: false, reason: "DB_ERROR", error: "Database Error: " + err.message };
   }
 }

@@ -50,6 +50,10 @@ export default function AdminDashboard() {
   const [validityMonths, setValidityMonths] = useState<number>(1);
   const [validityDays, setValidityDays] = useState<number | null>(null);
 
+  // 🔍 Search and Filter State
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "ACTIVE" | "SUSPENDED">("ALL");
+
   const [feedback, setFeedback] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -194,6 +198,30 @@ export default function AdminDashboard() {
     }
   };
 
+  // 🗑️ Permanent Delete with Cascading Clean-up
+  const handleDeleteLicense = async (appDomain: string) => {
+    if (!confirm(`⚠️ PERMANENT DELETE WARNING:\nAre you sure you want to delete [${appDomain}]?\nThis will remove the license and all associated tenant vault data permanently!`)) return;
+
+    setLoading(true);
+    try {
+      const res = await fetch("/api/admin/licenses", {
+        method: "DELETE",
+        headers: {
+          "x-admin-key": adminKey.trim(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ appDomain }),
+      });
+      const data = await res.json();
+      setFeedback(data.message || data.error);
+      fetchLicenses(adminKey);
+    } catch (err: any) {
+      setFeedback("Failed to delete license: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleLogout = () => {
     setAdminKey("");
     setIsAuth(false);
@@ -201,7 +229,21 @@ export default function AdminDashboard() {
     setFeedback("");
   };
 
-  // 🔐 1. कड़ा लॉगिन गेट (बिना सही पासवर्ड के डैशबोर्ड लोड ही नहीं होगा)
+  // 🎯 Filtered Licenses Calculation
+  const filteredLicenses = licenses.filter((lic) => {
+    const q = searchQuery.toLowerCase().trim();
+    const matchesSearch =
+      !q ||
+      lic.appDomain?.toLowerCase().includes(q) ||
+      lic.clientName?.toLowerCase().includes(q) ||
+      lic.lockedDeviceId?.toLowerCase().includes(q);
+
+    const matchesStatus = statusFilter === "ALL" || lic.status === statusFilter;
+
+    return matchesSearch && matchesStatus;
+  });
+
+  // 🔐 1. कड़ा लॉगिन गेट
   if (!isAuth) {
     return (
       <main className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
@@ -347,7 +389,6 @@ export default function AdminDashboard() {
           <div className="flex flex-wrap items-center gap-1.5 pt-1">
             <span className="text-[10px] text-slate-500 font-semibold mr-1">Quick Select:</span>
             
-            {/* ⚡ 7 Days Trial Chip */}
             <button
               type="button"
               onClick={() => {
@@ -390,9 +431,54 @@ export default function AdminDashboard() {
           </button>
         </form>
 
+        {/* 🔍 Universal Search & Filter Bar */}
+        <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl flex flex-col sm:flex-row items-center gap-3 shadow-lg">
+          <div className="relative flex-1 w-full">
+            <span className="absolute left-3.5 top-2.5 text-slate-500 text-xs">🔍</span>
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search by Domain, Client Name, or Machine/Device ID..."
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-8 py-2 text-xs text-slate-100 placeholder:text-slate-500 outline-none focus:border-indigo-500 transition font-medium"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="absolute right-3 top-2.5 text-xs text-slate-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          {/* Status Filter Tabs */}
+          <div className="flex items-center gap-1.5 w-full sm:w-auto">
+            {(["ALL", "ACTIVE", "SUSPENDED"] as const).map((status) => (
+              <button
+                key={status}
+                type="button"
+                onClick={() => setStatusFilter(status)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                  statusFilter === status
+                    ? "bg-indigo-600 text-white shadow-md"
+                    : "bg-slate-950 border border-slate-800 text-slate-400 hover:text-white"
+                }`}
+              >
+                {status}
+              </button>
+            ))}
+          </div>
+
+          <span className="text-[11px] text-indigo-400 font-mono bg-indigo-500/10 border border-indigo-500/30 px-3 py-1.5 rounded-xl whitespace-nowrap">
+            Found: {filteredLicenses.length}
+          </span>
+        </div>
+
         {/* 📋 Whitelisted Instances Table */}
         <div className="bg-slate-900/90 rounded-2xl border border-slate-800/90 overflow-x-auto shadow-xl [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-          <table className="w-full text-left border-collapse text-xs font-mono min-w-[780px]">
+          <table className="w-full text-left border-collapse text-xs font-mono min-w-[850px]">
             <thead>
               <tr className="bg-slate-950/70 border-b border-slate-800 text-slate-400 font-sans">
                 <th className="p-3.5">Client</th>
@@ -404,14 +490,14 @@ export default function AdminDashboard() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/60">
-              {licenses.length === 0 ? (
+              {filteredLicenses.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="p-6 text-center text-slate-500 font-sans">
-                    No domains registered yet. Whitelist your first app domain above.
+                    {searchQuery || statusFilter !== "ALL" ? "No matching licenses found." : "No domains registered yet. Whitelist your first app domain above."}
                   </td>
                 </tr>
               ) : (
-                licenses.map((lic) => {
+                filteredLicenses.map((lic) => {
                   const isExpired = lic.expiresAt && new Date() > new Date(lic.expiresAt);
 
                   return (
@@ -458,7 +544,7 @@ export default function AdminDashboard() {
                             className="px-2.5 py-1 bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-500/40 rounded-lg text-[11px] font-semibold transition cursor-pointer"
                             title="Add exactly 1 Month"
                           >
-                            +1 Month
+                            +1M
                           </button>
 
                           <button
@@ -468,7 +554,7 @@ export default function AdminDashboard() {
                             className="px-2.5 py-1 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-500/40 rounded-lg text-[11px] font-semibold transition cursor-pointer"
                             title="Add full 1 Year (12 Months)"
                           >
-                            +1 Year
+                            +1Y
                           </button>
 
                           <button
@@ -487,6 +573,16 @@ export default function AdminDashboard() {
                             className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-[11px] font-semibold transition cursor-pointer"
                           >
                             Toggle
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => handleDeleteLicense(lic.appDomain)}
+                            className="px-2.5 py-1 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-500/40 rounded-lg text-[11px] font-semibold transition cursor-pointer"
+                            title="Permanently Delete License & Associated Tenant Vault Data"
+                          >
+                            🗑️ Delete
                           </button>
                         </div>
                       </td>

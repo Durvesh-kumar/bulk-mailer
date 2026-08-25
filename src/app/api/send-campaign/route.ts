@@ -3,6 +3,7 @@ import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
+import { decryptPassword } from "@/lib/encryption"; // 👈 लोकल AES-256 डिक्रिप्शन इम्पोर्ट
 
 const sleepRandom = (min: number, max: number): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -69,8 +70,22 @@ export async function POST(req: Request) {
     }
 
     const cleanSender = senderEmail.trim().toLowerCase();
-    const cleanPassword = appPassword.replace(/\s+/g, "");
-    const cleanHeaderName = (senderName || "Ruby").trim();
+
+    // 🛡️ Smart Dual Password Handler:
+    // 1. अगर यूजर ने सीधे 16-अक्षर का ऐप पासवर्ड टाइप किया है -> सीधा इस्तेमाल करो
+    // 2. अगर वॉल्ट का एन्क्रिप्टेड सिफरटेक्स्ट आया है (iv:cipher) -> सर्वर मेमोरी में डिक्रिप्ट करो
+    const rawPass = String(appPassword).trim();
+    let cleanPassword = rawPass.replace(/\s+/g, "");
+
+    if (rawPass.includes(":") && rawPass.length > 32) {
+      try {
+        cleanPassword = decryptPassword(rawPass).replace(/\s+/g, "");
+      } catch (decErr) {
+        console.error("Vault password decryption fallback:", decErr);
+      }
+    }
+
+    const cleanHeaderName = senderName.trim();
 
     // 🔒 साइन-ऑफ नाम लॉजिक: अगर कस्टम नाम नहीं है या खाली है, तो सेंडर का नाम ही जाएगा
     const finalSignoffName =

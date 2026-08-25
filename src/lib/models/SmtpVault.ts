@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document, models, model } from "mongoose";
+// src/lib/models/SmtpVault.ts
+import mongoose, { Schema, Document, Model, Connection, models, model } from "mongoose";
 
 export type ProfileTier = "CURRENT" | "YEAR_1" | "YEAR_2" | "YEAR_4" | "YEAR_6";
 
@@ -8,12 +9,12 @@ export interface ISmtpAccount {
   appPassword: string;
   senderName: string;
   profileTier: ProfileTier;
+  lastSentAt?: Date;
   createdAt?: Date;
 }
 
-export interface ISmtpVault extends Document {
-  machineId: string;
-  appDomain: string;
+export interface ISmtpVault {
+  userId: string;
   accounts: ISmtpAccount[];
   createdAt: Date;
   updatedAt: Date;
@@ -42,21 +43,21 @@ const SmtpAccountSchema = new Schema<ISmtpAccount>(
       enum: ["CURRENT", "YEAR_1", "YEAR_2", "YEAR_4", "YEAR_6"],
       default: "YEAR_2",
     },
+    lastSentAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
-const SmtpVaultSchema = new Schema<ISmtpVault>(
+export const SmtpVaultSchema = new Schema<ISmtpVault>(
   {
-    machineId: {
+    userId: {
       type: String,
       required: true,
+      unique: true,
       index: true,
-    },
-    appDomain: {
-      type: String,
-      required: true,
-      lowercase: true,
       trim: true,
     },
     accounts: [SmtpAccountSchema],
@@ -64,9 +65,15 @@ const SmtpVaultSchema = new Schema<ISmtpVault>(
   { timestamps: true }
 );
 
-// HMR Hot-reloading safe pattern (आपके LicenseModel के समान)
-if (models.SmtpVault) {
-  delete (models as any).SmtpVault;
+// 🎯 टेनेंट DB कनेक्शन पर बाइंड करने वाला फंक्शन
+export function getSmtpVaultModel(conn?: Connection | typeof mongoose): Model<ISmtpVault> {
+  const target = conn || mongoose;
+  if (target.models && target.models.SmtpVault) {
+    return target.models.SmtpVault as Model<ISmtpVault>;
+  }
+  return target.model("SmtpVault", SmtpVaultSchema);
 }
 
-export const SmtpVaultModel = model<ISmtpVault>("SmtpVault", SmtpVaultSchema);
+// 🎯 डायरेक्ट मॉडल एक्सपोर्ट (एडमिन और अन्य फाइल्स के लिए)
+export const SmtpVaultModel: Model<ISmtpVault> =
+  models.SmtpVault || model<ISmtpVault>("SmtpVault", SmtpVaultSchema);

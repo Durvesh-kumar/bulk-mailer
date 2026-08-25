@@ -1,8 +1,10 @@
 // src/app/api/admin/licenses/route.ts
 import { NextResponse } from "next/server";
-import { connectToDatabase } from "@/lib/db";
 import { LicenseModel } from "@/lib/models/License";
 import { cleanAppDomain } from "@/lib/licenseGuard";
+import { connectToCentralDB } from "@/lib/db/centralDb";
+import { getTenantDB } from "@/lib/db/tenantDb"; // 👈 टेनेंट डीबी इम्पोर्ट ताकि कैस्केडिंग डिलीट हो सके
+import { SmtpVaultModel, getSmtpVaultModel } from "@/lib/models/SmtpVault"; // 👈 टेनेंट वॉल्ट मॉडल
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
@@ -13,13 +15,13 @@ function addMonthsToDate(fromDate: Date, monthsToAdd: number): Date {
   
   date.setMonth(date.getMonth() + monthsToAdd);
   
-  // महीने के अंत का ओवरफ्लो प्रिवेंशन (जैसे 31 तारीख वाले महीने)
   if (date.getDate() < originalDay) {
     date.setDate(0);
   }
   return date;
 }
 
+// 1. GET (List all licenses)
 export async function GET(req: Request) {
   try {
     const authHeader = req.headers.get("x-admin-key");
@@ -27,7 +29,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: "Unauthorized access" }, { status: 401 });
     }
 
-    await connectToDatabase();
+    await connectToCentralDB();
     const licenses = await LicenseModel.find({}).sort({ createdAt: -1 }).lean();
     return NextResponse.json({ success: true, licenses: licenses || [] });
   } catch (error: any) {
@@ -35,6 +37,7 @@ export async function GET(req: Request) {
   }
 }
 
+// 2. POST (Create, Renew, Reset Device, or Toggle Status)
 export async function POST(req: Request) {
   try {
     const authHeader = req.headers.get("x-admin-key");
@@ -42,14 +45,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Unauthorized access" }, { status: 401 });
     }
 
-    await connectToDatabase();
+    await connectToCentralDB();
 
     const body = await req.json();
     const action = body.action || "CREATE_APP_DOMAIN";
     const targetDomain = cleanAppDomain(body.appDomain || "");
     const clientName = (body.clientName || "Client").trim();
     
-    // अगर मंथ्स भेजे हैं तो मंथ्स, नहीं तो इयर्स को 12 से गुणा करके मंथ्स बनाएँ
     const monthsToAdd = body.validityMonths ? Number(body.validityMonths) : (Number(body.validityYears || 1) * 12);
 
     if (!targetDomain) {
@@ -84,12 +86,11 @@ export async function POST(req: Request) {
       });
     }
 
-    // 2️⃣ RENEW ACTION (Month या Year दोनों के लिए)
+    // 2️⃣ RENEW SUBSCRIPTION
     if (action === "RENEW_SUBSCRIPTION") {
       const lic = await LicenseModel.findOne({ appDomain: targetDomain });
       if (!lic) return NextResponse.json({ error: `Domain not found.` }, { status: 404 });
 
-      // अगर पहले से एक्सपायर है तो आज से जोड़ें, वरना मौजूदा एक्सपायरी से आगे बढ़ाएँ
       const baseDate = lic.expiresAt && new Date(lic.expiresAt) > new Date()
         ? new Date(lic.expiresAt)
         : new Date();
@@ -140,5 +141,66 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
   } catch (error: any) {
     return NextResponse.json({ success: false, error: error.message || "Internal Server Error" }, { status: 500 });
+  }
+}
+
+// 3. DELETE (Cascading Delete: सेंट्रल डीबी से लाइसेंस और टेनेंट डीबी से सारा वॉल्ट डेटा साफ़ करना)
+export async function DELETE(req: Request) {
+  try {
+    const authHeader = req.headers.get("x-admin-key");
+    if (!ADMIN_SECRET || authHeader !== ADMIN_SECRET) {
+      return NextResponse.json({ error: "Unauthorized access" }, { status: 401 });
+    }
+
+    const body = await req.json();
+    const targetDomain = cleanAppDomain(body.appDomain || "");
+    const directUserId = body.userId ? String(body.userId).trim() : "";
+
+    if (!targetDomain && !directUserId) {
+      return NextResponse.json(
+        { error: "Target App Domain or userId is required for deletion." },
+        { status: 400 }
+      );
+    }
+
+    await connectToCentralDB();
+
+    // 1️⃣ सेंट्रल डीबी से लाइसेंस ढूँढकर हटाओ
+    let deletedLicense = null;
+    if (targetDomain) {
+      deletedLicense = await LicenseModel.findOneAndDelete({ appDomain: targetDomain });
+    } else if (directUserId) {
+      deletedLicense = await LicenseModel.findOneAndDelete({ _id: directUserId });
+    }
+
+    if (!deletedLicense) {
+      return NextResponse.json({ error: "License not found in Central Database." }, { status: 404 });
+    }
+
+    // लाइसेंस की यूनिक ID (userId) निकालो
+    const resolvedUserId = String(deletedLicense._id);
+
+    // 2️⃣ ⚡ Cascading Clean-up: टेनेंट डीबी से उस userId का सारा SMTP Vault डेटा हमेशा के लिए उड़ाओ!
+    try {
+      const tenantConn = await getTenantDB();
+      const TenantVault = getSmtpVaultModel(tenantConn);
+
+      // userId के आधार पर पूरी तरह डिलीट करो (Fallback के साथ)
+      await TenantVault.deleteMany({
+        $or: [
+          { userId: resolvedUserId },
+          ...(directUserId ? [{ userId: directUserId }] : [])
+        ]
+      });
+    } catch (tenantErr) {
+      console.error("Warning: Tenant DB cleanup failed during license deletion:", tenantErr);
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `License (${deletedLicense.appDomain || resolvedUserId}) and all associated tenant vault data have been permanently deleted!`,
+    });
+  } catch (error: any) {
+    return NextResponse.json({ success: false, error: error.message || "Failed to delete license." }, { status: 500 });
   }
 }

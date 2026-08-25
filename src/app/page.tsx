@@ -7,8 +7,6 @@ import { getClientMachineId } from "@/lib/fingerprint";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import ReferralBanner from "@/components/ReferralBanner";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
-
-// 🚀 Smart Modules & Modals Integration (फालतू generateFrontendPreviewVariation इम्पोर्ट यहाँ से हटा दिया गया है)
 import RejectedLeadsModal from "@/components/modals/RejectedLeadsModal";
 import SpintaxPreviewModal from "@/components/modals/SpintaxPreviewModal";
 import { cleanAndFilterLeads, RejectedEmailItem } from "@/lib/leadCleaner";
@@ -17,9 +15,10 @@ export type ProfileTier = "CURRENT" | "YEAR_1" | "YEAR_2" | "YEAR_4" | "YEAR_6";
 
 const SESSION_TOKEN_KEY = "reachout_daily_session_token";
 const PENDING_QUEUE_STORAGE_KEY = "inboxsend_pending_queue_state";
-const SENDERS_QUEUE_STORAGE_KEY = "inboxsend_senders_state";
+const SENDERS_COOLDOWN_STORAGE_KEY = "inboxsend_senders_cooldown_state";
 const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
+const COOLDOWN_DURATION_MS = 24 * 60 * 60 * 1000; // 24 Hours Cooldown
 
 interface SmtpAccount {
   _id: string;
@@ -55,6 +54,7 @@ export default function Home() {
   const [selectedTier, setSelectedTier] = useState<ProfileTier>("YEAR_2");
   const [isVaultLoaded, setIsVaultLoaded] = useState(false);
 
+  // Active Sender State
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
@@ -64,6 +64,7 @@ export default function Home() {
   const [currentSenderIndex, setCurrentSenderIndex] = useState<number>(0);
   const [sendersUsedRounds, setSendersUsedRounds] = useState<number>(0);
 
+  // Campaign Form State
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
   const [subject, setSubject] = useState("");
@@ -71,10 +72,23 @@ export default function Home() {
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
+  // Rotation Control State
   const [rotationMode, setRotationMode] = useState<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
   const [pauseAfterNSenders, setPauseAfterNSenders] = useState<number>(2);
 
+  // Live Mutable Refs for seamless Pause & Resume without stale closures
   const isStopRequestedRef = useRef(false);
+  const subjectRef = useRef("");
+  const templateRef = useRef("");
+  const customSignoffNameRef = useRef("");
+  const rotationModeRef = useRef<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
+  const pauseAfterNSendersRef = useRef<number>(2);
+
+  useEffect(() => { subjectRef.current = subject; }, [subject]);
+  useEffect(() => { templateRef.current = template; }, [template]);
+  useEffect(() => { customSignoffNameRef.current = customSignoffName; }, [customSignoffName]);
+  useEffect(() => { rotationModeRef.current = rotationMode; }, [rotationMode]);
+  useEffect(() => { pauseAfterNSendersRef.current = pauseAfterNSenders; }, [pauseAfterNSenders]);
 
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
@@ -108,11 +122,7 @@ export default function Home() {
         const res = await fetch("/api/check-license", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            machineId: currentMachineId,
-            domain: currentDomain,
-            sessionToken: savedSession,
-          }),
+          body: JSON.stringify({ machineId: currentMachineId, domain: currentDomain, sessionToken: savedSession }),
         });
 
         const data = await res.json();
@@ -139,34 +149,6 @@ export default function Home() {
           } catch (e) {
             console.error("Queue restore error:", e);
           }
-
-          try {
-            const savedSendersState = localStorage.getItem(SENDERS_QUEUE_STORAGE_KEY);
-            if (savedSendersState) {
-              const parsedState = JSON.parse(savedSendersState);
-              if (parsedState.senders && parsedState.senders.length > 0) {
-                setInMemorySenders(parsedState.senders);
-                const sIdx = parsedState.currentIndex || 0;
-                setCurrentSenderIndex(sIdx);
-                setSendersUsedRounds(parsedState.rounds || 0);
-
-                const active = parsedState.senders[sIdx] || parsedState.senders[0];
-                setSenderEmail(active.email);
-                setAppPassword(active.appPassword);
-                setSenderName(active.senderName);
-                if (active.profileTier) {
-                  const tierKey = active.profileTier as ProfileTier;
-                  setSelectedTier(tierKey);
-                  if (TIER_META[tierKey]) {
-                    setAccountAgeMode(TIER_META[tierKey].modeMap);
-                  }
-                }
-                setIsVaultLoaded(true);
-              }
-            }
-          } catch (e) {
-            console.error("Senders restore error:", e);
-          }
         }
       } catch {
         setIsSuspended(true);
@@ -178,44 +160,62 @@ export default function Home() {
     initSecurityAndLicense();
   }, []);
 
+  // 🛡️ Helper: Check if sender is under 24-hour cooldown
+  const isSenderInCooldown = (email: string): boolean => {
+    try {
+      const cooldownMap = JSON.parse(localStorage.getItem(SENDERS_COOLDOWN_STORAGE_KEY) || "{}");
+      const lastUsedTime = cooldownMap[email.toLowerCase()];
+      if (!lastUsedTime) return false;
+      const elapsed = Date.now() - lastUsedTime;
+      return elapsed < COOLDOWN_DURATION_MS;
+    } catch {
+      return false;
+    }
+  };
+
+  // 🛡️ Helper: Mark sender as used (Set Cooldown Timestamp)
+  const markSenderUsed = (email: string) => {
+    try {
+      const cooldownMap = JSON.parse(localStorage.getItem(SENDERS_COOLDOWN_STORAGE_KEY) || "{}");
+      cooldownMap[email.toLowerCase()] = Date.now();
+      localStorage.setItem(SENDERS_COOLDOWN_STORAGE_KEY, JSON.stringify(cooldownMap));
+    } catch (e) {
+      console.error("Cooldown save error:", e);
+    }
+  };
+
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
     setLoading(true);
     setProgressStatus(`Loading ${TIER_META[tier].label} accounts...`);
-
     const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
     try {
       const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}&tier=${tier}`, {
         method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-session-token": savedSession,
-        },
+        headers: { "Content-Type": "application/json", "x-session-token": savedSession },
       });
 
       const data = await res.json();
       if (data.accounts && data.accounts.length > 0) {
         const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
         
-        if (currentTierOnly.length > 0) {
-          setInMemorySenders(currentTierOnly);
+        // Filter out accounts currently in 24-hour cooldown
+        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email));
+
+        if (availableAccounts.length > 0) {
+          setInMemorySenders(availableAccounts);
           setCurrentSenderIndex(0);
           setSendersUsedRounds(0);
-          setSenderEmail(currentTierOnly[0].email);
-          setAppPassword(currentTierOnly[0].appPassword);
-          setSenderName(currentTierOnly[0].senderName);
+          setSenderEmail(availableAccounts[0].email);
+          setAppPassword(availableAccounts[0].appPassword);
+          setSenderName(availableAccounts[0].senderName);
           setSelectedTier(tier);
           setAccountAgeMode(TIER_META[tier].modeMap);
           setIsVaultLoaded(true);
-          setLastBatchMessage(`⚡ Loaded ${currentTierOnly.length} account(s) for ${TIER_META[tier].label}`);
-
-          localStorage.setItem(
-            SENDERS_QUEUE_STORAGE_KEY,
-            JSON.stringify({ senders: currentTierOnly, currentIndex: 0, rounds: 0 })
-          );
+          setLastBatchMessage(`⚡ Loaded ${availableAccounts.length} active account(s) (${currentTierOnly.length - availableAccounts.length} in 24h cooldown skipped)`);
         } else {
-          alert(`No accounts registered under ${TIER_META[tier].label} in your Vault.`);
+          alert(`⚠️ All accounts in ${TIER_META[tier].label} are currently under 24-hour cooldown protection!`);
         }
       } else {
         alert(`No accounts registered under ${TIER_META[tier].label} in your Vault.`);
@@ -229,24 +229,16 @@ export default function Home() {
   };
 
   const handleBatchSizeChange = (val: string) => {
-    if (val === "") {
-      setBatchSize(0);
-      return;
-    }
+    if (val === "") { setBatchSize(0); return; }
     const num = parseInt(val, 10);
     const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-    if (!isNaN(num)) {
-      setBatchSize(Math.min(num, maxLimit));
-    }
+    if (!isNaN(num)) setBatchSize(Math.min(num, maxLimit));
   };
 
   const handleBatchSizeBlur = () => {
     const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-    if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) {
-      setBatchSize(DEFAULT_BATCH_SIZE);
-    } else if (batchSize > maxLimit) {
-      setBatchSize(maxLimit);
-    }
+    if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) setBatchSize(DEFAULT_BATCH_SIZE);
+    else if (batchSize > maxLimit) setBatchSize(maxLimit);
   };
 
   const handleAutoCleanLeads = () => {
@@ -254,7 +246,6 @@ export default function Home() {
       alert("⚠️ Please paste your email leads list in the box first to clean!");
       return;
     }
-
     const result = cleanAndFilterLeads(rawSheetData);
     setRawSheetData(result.cleanedText);
     setRejectedData(result.rejectedList);
@@ -264,14 +255,9 @@ export default function Home() {
       syntax: result.syntaxErrorsCount,
       temp: result.disposableCount,
     });
-
-    if (result.rejectedCount > 0) {
-      setShowRejectedModal(true);
-    } else if (result.validEmails.length > 0) {
-      alert(`✨ All ${result.validEmails.length} leads are 100% clean and valid!`);
-    } else {
-      alert("❌ No valid email addresses found.");
-    }
+    if (result.rejectedCount > 0) setShowRejectedModal(true);
+    else if (result.validEmails.length > 0) alert(`✨ All ${result.validEmails.length} leads are 100% clean and valid!`);
+    else alert("❌ No valid email addresses found.");
   };
 
   const handleCopyFailedDetailed = () => {
@@ -294,12 +280,12 @@ export default function Home() {
     setTimeout(() => setCopiedType(null), 2500);
   };
 
+  // 🛑 PAUSE / STOP: कहीं भी कैंपेन रोककर टेम्पलेट/सब्जेक्ट बदलने की पूरी आजादी देता है
   const handleStopCampaign = () => {
     isStopRequestedRef.current = true;
     setLoading(false);
-    setIsCampaignStarted(false);
-    setProgressStatus("Campaign stopped manually by user.");
-    setLastBatchMessage("🛑 Campaign halted. Remaining queue is safely saved.");
+    setProgressStatus("");
+    setLastBatchMessage("⏸️ Campaign paused by user! Edit your Subject or Template below and click Resume.");
   };
 
   const handleStartCampaign = async (e: React.FormEvent) => {
@@ -307,7 +293,6 @@ export default function Home() {
     if (loading) return;
 
     isStopRequestedRef.current = false;
-
     const result = cleanAndFilterLeads(rawSheetData);
     if (result.validEmails.length === 0) {
       alert("Please paste valid email addresses in the target leads box!");
@@ -332,15 +317,9 @@ export default function Home() {
     }
 
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    const safeBatchSize = batchSize > 0 
-      ? Math.min(batchSize, currentModeConfig.maxLot) 
-      : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
 
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
-    localStorage.setItem(
-      SENDERS_QUEUE_STORAGE_KEY,
-      JSON.stringify({ senders: activeSenders, currentIndex: 0, rounds: 0 })
-    );
 
     setPendingEmails(result.validEmails);
     setInitialTotalCount(result.validEmails.length);
@@ -367,6 +346,7 @@ export default function Home() {
     );
   };
 
+  // 🚀 Fully Automated Non-Stop Batch Pipeline with 1-by-1 Continuous Mode & Live Editing Support
   const consumeQueueBatch = async (
     currentQueue: string[],
     sendersList: SmtpAccount[],
@@ -381,9 +361,10 @@ export default function Home() {
     activeName: string
   ) => {
     if (isStopRequestedRef.current || currentQueue.length === 0) {
-      setIsCampaignStarted(false);
       setLoading(false);
+      setProgressStatus("");
       if (currentQueue.length === 0) {
+        setIsCampaignStarted(false);
         localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
         alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
       }
@@ -394,8 +375,11 @@ export default function Home() {
     setLastBatchMessage("");
     let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
     
-    const batchToSend = currentQueue.slice(0, bSize);
-    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 10;
+    // Continuous = 1-by-1 | Every N Senders / Every Sender Turn = Target Batch Size
+    const isSingleShot = rotationModeRef.current === "CONTINUOUS";
+    const actualBatchLimit = isSingleShot ? 1 : bSize;
+    const batchToSend = currentQueue.slice(0, actualBatchLimit);
+    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 8;
 
     let batchProcessedCount = 0;
     let batchSuccessCount = 0;
@@ -409,7 +393,7 @@ export default function Home() {
         const startNum = i + 1;
         const endNum = Math.min(i + activeChunkSize, batchToSend.length);
 
-        setProgressStatus(`[${activeEmail}] Dispatching ${startNum}-${endNum} of ${batchToSend.length}...`);
+        setProgressStatus(`[${activeEmail}] Dispatching chunk ${startNum}-${endNum} of ${batchToSend.length} (${mode})...`);
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -419,9 +403,9 @@ export default function Home() {
             senderEmail: activeEmail.trim().toLowerCase(),
             appPassword: activePass.replace(/\s+/g, ""),
             recipients: chunk,
-            subject: subject.trim(),
-            template: template.trim(),
-            customSignoffName: customSignoffName.trim(),
+            subject: subjectRef.current.trim(),
+            template: templateRef.current.trim(),
+            customSignoffName: customSignoffNameRef.current.trim(),
             accountAgeMode: mode,
             machineId,
             sessionToken: latestSessionToken,
@@ -432,34 +416,20 @@ export default function Home() {
 
         if (data.accountError || res.status === 400 || res.status === 401) {
           fallbackTriggered = true;
-          const reasonText =
-            data.accountErrorType === "QUOTA_EXCEEDED"
-              ? "Daily Sending Quota Exceeded"
-              : "Authentication Failed / Invalid Password";
+          alert(`⚠️ [${activeEmail}] Quota exceeded or auth failed! Switching to next healthy account...`);
 
-          alert(`⚠️ [${activeEmail}] ${reasonText}!\n⚡ Auto-switching to next healthy account from Vault...`);
-
-          const remainingSenders = sendersList.filter(
-            (s) => s.email.toLowerCase() !== activeEmail.toLowerCase()
-          );
-
+          const remainingSenders = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
           if (remainingSenders.length === 0) {
-            alert("❌ All sender accounts in this tier failed or hit daily limit. Please update accounts in Vault.");
+            alert("❌ All sender accounts failed or hit limits.");
             setLoading(false);
             return;
           }
 
           const nextSender = remainingSenders[0];
           setInMemorySenders(remainingSenders);
-          setCurrentSenderIndex(0);
           setSenderEmail(nextSender.email);
           setAppPassword(nextSender.appPassword);
           setSenderName(nextSender.senderName);
-
-          localStorage.setItem(
-            SENDERS_QUEUE_STORAGE_KEY,
-            JSON.stringify({ senders: remainingSenders, currentIndex: 0, rounds: roundsDone })
-          );
 
           const unhandledQueue = currentQueue.slice(batchProcessedCount);
           await consumeQueueBatch(
@@ -480,12 +450,14 @@ export default function Home() {
 
         if (res.status === 403) {
           setIsSuspended(true);
-          break;
+          setLoading(false);
+          return;
         }
 
         if (!res.ok) {
           alert(`Execution Error: ${data.error || "Delivery halted unexpectedly"}`);
-          break;
+          setLoading(false);
+          return;
         }
 
         if (data.sessionToken) {
@@ -514,6 +486,8 @@ export default function Home() {
       }
 
       if (!isStopRequestedRef.current && !fallbackTriggered) {
+        markSenderUsed(activeEmail);
+
         const remainingQueue = currentQueue.slice(batchToSend.length);
         const updatedTotalProcessed = currentProcessed + batchProcessedCount;
         const updatedTotalSuccess = currentSuccess + batchSuccessCount;
@@ -531,86 +505,138 @@ export default function Home() {
         }
 
         if (batchToSend.length > 0) {
-          setLastBatchMessage(`✅ Batch of ${batchToSend.length} leads dispatched using ${activeEmail}`);
+          setLastBatchMessage(`✅ Processed via ${activeEmail}`);
         }
 
-        if (sendersList.length > 0) {
-          const nextSenderIdx = (senderIdx + 1) % sendersList.length;
-          const nextSender = sendersList[nextSenderIdx];
+        // Senders Rotation
+        let nextSender = sendersList[0];
+        let nextSenderIdx = 0;
+        if (sendersList.length > 1) {
+          nextSenderIdx = (senderIdx + 1) % sendersList.length;
+          nextSender = sendersList[nextSenderIdx];
           setCurrentSenderIndex(nextSenderIdx);
           setSenderEmail(nextSender.email);
           setAppPassword(nextSender.appPassword);
           setSenderName(nextSender.senderName);
-
-          localStorage.setItem(
-            SENDERS_QUEUE_STORAGE_KEY,
-            JSON.stringify({
-              senders: sendersList,
-              currentIndex: nextSenderIdx,
-              rounds: updatedRounds,
-            })
-          );
         }
 
+        // Check if finished
         if (remainingQueue.length === 0) {
+          try {
+            await fetch("/api/smtp-vault", {
+              method: "PATCH",
+              headers: { 
+                "Content-Type": "application/json",
+                "x-session-token": latestSessionToken 
+              },
+              body: JSON.stringify({
+                machineId,
+                sessionToken: latestSessionToken,
+                updateType: "BULK_UPDATE_TIMESTAMP",
+                updateData: { emails: sendersList.map(s => s.email) }
+              })
+            });
+          } catch (e) {
+            console.error(e);
+          }
           setIsCampaignStarted(false);
+          setLoading(false);
+          setProgressStatus("");
           setRawSheetData("");
+          alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
+          return;
         }
 
-        if (remainingQueue.length > 0 && rotationMode !== "CONTINUOUS") {
-          let shouldPause = false;
+        // Check Manual Pause Options
+        let shouldPause = false;
+        if (rotationModeRef.current === "EVERY_SINGLE_SENDER") shouldPause = true;
+        else if (rotationModeRef.current === "EVERY_N_SENDERS") {
+          const n = Math.max(1, pauseAfterNSendersRef.current);
+          if (updatedRounds > 0 && updatedRounds % n === 0) shouldPause = true;
+        }
 
-          if (rotationMode === "EVERY_SINGLE_SENDER") {
-            shouldPause = true;
-          } else if (rotationMode === "EVERY_N_SENDERS") {
-            const n = Math.max(1, pauseAfterNSenders);
-            if (updatedRounds > 0 && updatedRounds % n === 0) {
-              shouldPause = true;
+        if (shouldPause) {
+          setLoading(false);
+          setProgressStatus("");
+          alert(
+            `⏸️ [Rotation Pause Triggered]\n` +
+            `Sender [${activeEmail}] completed turn #${updatedRounds}.\n` +
+            `You can now modify your Subject or Template below and click Resume!`
+          );
+          return;
+        }
+
+        // 🔄 CONTINUOUS (NON-STOP) AUTO-DISPATCH
+        if (rotationModeRef.current === "CONTINUOUS" && remainingQueue.length > 0 && !isStopRequestedRef.current) {
+          const nextBatchSize = batchSize > 0 ? Math.min(batchSize, currentMaxLot) : DEFAULT_BATCH_SIZE;
+          setTimeout(() => {
+            if (!isStopRequestedRef.current) {
+              consumeQueueBatch(
+                remainingQueue,
+                sendersList,
+                nextSenderIdx,
+                updatedRounds,
+                updatedTotalProcessed,
+                updatedTotalSuccess,
+                nextBatchSize,
+                mode,
+                nextSender.email,
+                nextSender.appPassword,
+                nextSender.senderName
+              );
             }
-          }
-
-          if (shouldPause) {
-            alert(
-              `⏸️ [Rotation Pause Triggered]\n` +
-              `Sender [${activeEmail}] completed turn #${updatedRounds}.\n` +
-              `Please update your Subject and Email Template before sending the next batch!`
-            );
-          }
+          }, 800);
+        } else {
+          setLoading(false);
         }
       }
     } catch {
       alert("Network error. Please check your connection.");
-    } finally {
       setLoading(false);
       setProgressStatus("");
     }
   };
 
-  const handleNextBatch = (e: React.FormEvent) => {
+  // ▶ RESUME / NEXT BATCH (जहाँ रुके थे वहीं से अपडेटेड टेम्पलेट/सब्जेक्ट के साथ आगे चालू करेगा)
+  const handleResumeOrNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading || pendingEmails.length === 0) return;
-    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, maxLimit) : DEFAULT_BATCH_SIZE;
 
     isStopRequestedRef.current = false;
+    let activeSenders = inMemorySenders;
+    if (activeSenders.length === 0) {
+      activeSenders = [{
+        _id: "manual_1",
+        email: senderEmail.trim().toLowerCase(),
+        appPassword: appPassword.replace(/\s+/g, ""),
+        senderName: senderName.trim(),
+        profileTier: selectedTier,
+      }];
+      setInMemorySenders(activeSenders);
+    }
+
+    const currentSender = activeSenders[currentSenderIndex] || activeSenders[0];
+    const currentModeConfig = MODE_CONFIGS[accountAgeMode];
+    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+
     consumeQueueBatch(
       pendingEmails,
-      inMemorySenders,
+      activeSenders,
       currentSenderIndex,
       sendersUsedRounds,
       processedCount,
       successCount,
       safeBatchSize,
       accountAgeMode,
-      senderEmail,
-      appPassword,
-      senderName
+      currentSender.email,
+      currentSender.appPassword,
+      currentSender.senderName
     );
   };
 
   const handleFullReset = () => {
     if (loading) return;
-    if (confirm("Reset current campaign and clear queue?")) {
+    if (confirm("Reset current campaign and clear queue completely?")) {
       isStopRequestedRef.current = true;
       setIsCampaignStarted(false);
       setPendingEmails([]);
@@ -633,7 +659,6 @@ export default function Home() {
       setProgressStatus("");
       setLastBatchMessage("");
       localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
-      localStorage.removeItem(SENDERS_QUEUE_STORAGE_KEY);
     }
   };
 
@@ -661,7 +686,8 @@ export default function Home() {
 
   const remainingCount = pendingEmails.length;
   const currentMaxLot = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-  const currentBatchTarget = Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
+  const isContinuous = rotationMode === "CONTINUOUS";
+  const currentBatchTarget = isContinuous ? 1 : Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
 
   const totalAccountsCount = inMemorySenders.length;
   const remainingAccountsInQueue = totalAccountsCount > 0 
@@ -674,12 +700,13 @@ export default function Home() {
 
         <ReferralBanner />
         
+        {/* Header Bar */}
         <div className="bg-slate-900/90 border border-slate-800 px-5 py-3 rounded-2xl flex flex-wrap justify-between items-center gap-3 shadow-xl">
           <div className="flex items-center gap-3">
             <img src="/icons/engine-hub.svg" alt="Hub" className="w-7 h-7 object-contain" />
             <div>
               <h1 className="text-lg font-black bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent leading-tight">
-                InboxSend Multi-Account Rotator
+                InboxSend Multi-Account Rotator (V3 Engine)
               </h1>
               <p className="text-[10px] text-slate-400 font-mono">
                 Hardware Binding: <span className="text-indigo-400">{machineId || "Authenticating..."}</span>
@@ -705,6 +732,7 @@ export default function Home() {
           </div>
         </div>
 
+        {/* 🎯 8 STATS CARDS GRID */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 bg-slate-900/90 border border-slate-800 p-3 rounded-2xl shadow-lg">
           <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
             <span className="text-[9px] text-slate-400 uppercase font-black block">Senders Loaded</span>
@@ -752,6 +780,7 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Live Progress Bar */}
         {loading && (
           <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-2.5 rounded-2xl flex items-center justify-between shadow-xl animate-pulse">
             <div className="flex items-center gap-3">
@@ -763,7 +792,7 @@ export default function Home() {
               onClick={handleStopCampaign}
               className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-md cursor-pointer"
             >
-              🛑 Stop Campaign
+              🛑 Pause / Stop
             </button>
           </div>
         )}
@@ -787,7 +816,7 @@ export default function Home() {
                   </span>
                   {isVaultLoaded && (
                     <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
-                      ✓ {inMemorySenders.length} Loaded
+                      ✓ {inMemorySenders.length} Loaded (24h Cooldown Filtered)
                     </span>
                   )}
                 </div>
@@ -922,14 +951,14 @@ export default function Home() {
                       }}
                       className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
                     >
-                      <option value="AGED">🟢 Aged (2+ Yrs) - Max 100</option>
-                      <option value="STANDARD">🟡 Standard (6 Mo-2 Yrs) - Max 50</option>
-                      <option value="FRESH">🔴 Fresh (&lt;6 Mo) - Max 30</option>
+                      <option value="AGED">🟢 Aged (2+ Yrs) - Max 100 (Chunks)</option>
+                      <option value="STANDARD">🟡 Standard (6 Mo-2 Yrs) - Max 50 (Chunks)</option>
+                      <option value="FRESH">🔴 Fresh (&lt;6 Mo) - Max 30 (Chunks)</option>
                     </select>
                   </div>
 
                   <div>
-                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Batch Size per Sender Turn</label>
+                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Batch Size per Turn</label>
                     <input
                       type="number"
                       min={MIN_ALLOWED_BATCH_SIZE}
@@ -945,38 +974,24 @@ export default function Home() {
                   </div>
                 </div>
 
+                {/* Rotation Control Panel */}
                 <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
                   <label className="text-[11px] font-bold text-indigo-300 block">
-                    🔄 Template & Subject Rotation Control:
+                    🔄 Rotation & Dispatching Settings:
                   </label>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                     <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "CONTINUOUS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
-                      <input 
-                        type="radio" 
-                        name="rotationModeOption" 
-                        checked={rotationMode === "CONTINUOUS"} 
-                        onChange={() => setRotationMode("CONTINUOUS")} 
-                      />
-                      <span>Continuous (No Stop)</span>
+                      <input type="radio" name="rotationModeOption" checked={rotationMode === "CONTINUOUS"} onChange={() => setRotationMode("CONTINUOUS")} />
+                      <span>Continuous (1-by-1 Non-Stop)</span>
                     </label>
                     
                     <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_N_SENDERS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
-                      <input 
-                        type="radio" 
-                        name="rotationModeOption" 
-                        checked={rotationMode === "EVERY_N_SENDERS"} 
-                        onChange={() => setRotationMode("EVERY_N_SENDERS")} 
-                      />
+                      <input type="radio" name="rotationModeOption" checked={rotationMode === "EVERY_N_SENDERS"} onChange={() => setRotationMode("EVERY_N_SENDERS")} />
                       <span>Pause after N Senders</span>
                     </label>
 
                     <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_SINGLE_SENDER" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
-                      <input 
-                        type="radio" 
-                        name="rotationModeOption" 
-                        checked={rotationMode === "EVERY_SINGLE_SENDER"} 
-                        onChange={() => setRotationMode("EVERY_SINGLE_SENDER")} 
-                      />
+                      <input type="radio" name="rotationModeOption" checked={rotationMode === "EVERY_SINGLE_SENDER"} onChange={() => setRotationMode("EVERY_SINGLE_SENDER")} />
                       <span>Pause Every Sender Turn</span>
                     </label>
                   </div>
@@ -985,12 +1000,10 @@ export default function Home() {
                     <div className="pt-2 flex items-center gap-3">
                       <span className="text-[11px] text-slate-300">Pause after how many senders?</span>
                       <input 
-                        type="number" 
-                        min={1} 
-                        max={totalAccountsCount || 10} 
+                        type="number" min={1} max={20} 
                         value={pauseAfterNSenders}
                         onChange={(e) => setPauseAfterNSenders(parseInt(e.target.value) || 1)}
-                        className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center"
                       />
                     </div>
                   )}
@@ -1012,26 +1025,25 @@ export default function Home() {
                 <div className="space-y-1">
                   <div className="flex justify-between items-center">
                     <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
-                      <img src="/icons/copy-clipboard.svg" alt="Body" className="w-3 h-3 object-contain opacity-70" />
-                      Email Body Template
+                      Email Body Template (Live Editable)
                     </label>
                     <button
                       type="button"
                       onClick={() => setShowPreviewModal(true)}
                       className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
                     >
-                      👁️ Spintax Preview (4 Samples)
+                      👁️ Spintax Preview
                     </button>
                   </div>
 
                   <textarea
-                    rows={11}
+                    rows={10}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
                     placeholder="Type your outreach message here..."
-                    className="w-full min-h-[230px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
+                    className="w-full min-h-[210px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
                   />
                 </div>
 
@@ -1056,12 +1068,11 @@ export default function Home() {
                 {loading ? (
                   <>
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    <span>Dispatching Batch 1...</span>
+                    <span>Dispatching Running...</span>
                   </>
                 ) : (
                   <>
-                    <img src="/icons/gmail.svg" alt="Send" className="w-4 h-4 object-contain" />
-                    <span>🚀 Launch Campaign & Send Batch 1 ({Math.min(batchSize || DEFAULT_BATCH_SIZE, currentMaxLot)} Leads)</span>
+                    <span>🚀 Launch Campaign & Send (Automated Non-Stop)</span>
                   </>
                 )}
               </button>
@@ -1069,25 +1080,42 @@ export default function Home() {
 
           </form>
         ) : (
+          /* STEP 2: IN-MEMORY ROTATION & LIVE EDIT DASHBOARD */
           <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
             {remainingCount > 0 ? (
-              <form onSubmit={handleNextBatch} className="space-y-3 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
-                <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                  <h3 className="text-xs font-black text-indigo-400 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-indigo-400 animate-ping" />
-                    Next Batch: {currentBatchTarget} Pending Leads Ready
-                  </h3>
+              <form onSubmit={handleResumeOrNextBatch} className="space-y-4 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
+                <div className="flex flex-wrap justify-between items-center border-b border-slate-800 pb-3 gap-2">
+                  <div>
+                    <h3 className="text-xs font-black text-indigo-400 flex items-center gap-2">
+                      <span className={`w-2.5 h-2.5 rounded-full ${loading ? "bg-emerald-400 animate-ping" : "bg-amber-400"}`} />
+                      {loading ? "🚀 Auto-Dispatching Active..." : "⏸️ Campaign Paused - Ready to Resume"}
+                    </h3>
+                    <p className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                      Active Sender: <span className="text-indigo-300 font-bold">{senderEmail}</span> (Turn #{sendersUsedRounds + 1})
+                    </p>
+                  </div>
+
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-0.5 rounded-full border border-amber-500/20">
+                    <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-1 rounded-full border border-amber-500/20">
                       Remaining in Queue: {remainingCount}
                     </span>
-                    <button
-                      type="button"
-                      onClick={handleStopCampaign}
-                      className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-sm cursor-pointer"
-                    >
-                      🛑 Stop Campaign
-                    </button>
+                    {loading ? (
+                      <button
+                        type="button"
+                        onClick={handleStopCampaign}
+                        className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-md cursor-pointer"
+                      >
+                        🛑 Pause / Stop
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleFullReset}
+                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition border border-slate-700 cursor-pointer"
+                      >
+                        🔄 Reset All
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1138,28 +1166,66 @@ export default function Home() {
                   </div>
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-xl text-xs sm:text-sm transition-all duration-300 shadow-xl disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
-                >
-                  {loading ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      <span>Dispatching Next Batch...</span>
-                    </>
-                  ) : (
-                    <>
-                      <img src="/icons/gmail.svg" alt="Send" className="w-4 h-4 object-contain" />
-                      <span>Dispatch Next Batch ({currentBatchTarget} Leads)</span>
-                    </>
-                  )}
-                </button>
+                {/* 📝 Live Editable Subject, Template & Signature during Campaign / Pause */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  <div>
+                    <label className="text-[10px] text-slate-300 block mb-1 font-bold">
+                      ✏️ Live Subject Line (Updates instantly on next send)
+                    </label>
+                    <input
+                      type="text"
+                      value={subject}
+                      onChange={(e) => setSubject(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-slate-300 block mb-1 font-bold">
+                      ✏️ Live Sign-off / Signature
+                    </label>
+                    <input
+                      type="text"
+                      value={customSignoffName}
+                      onChange={(e) => setCustomSignoffName(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-emerald-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="w-full space-y-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] text-slate-300 font-bold">
+                      ✏️ Live Email Template Body (Takes effect immediately on next send/resume)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowPreviewModal(true)}
+                      className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
+                    >
+                      👁️ Spintax Preview
+                    </button>
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={template}
+                    onChange={(e) => setTemplate(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-100 outline-none leading-relaxed resize-none focus:border-indigo-500"
+                  />
+                </div>
+
+                {/* RESUME / NEXT DISPATCH BUTTON */}
+                {!loading && (
+                  <button
+                    type="submit"
+                    className="w-full py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-black rounded-xl text-xs sm:text-sm transition-all duration-300 shadow-xl flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
+                  >
+                    <span>▶️ Resume Campaign (Dispatch {currentBatchTarget} Leads via [{senderEmail}])</span>
+                  </button>
+                )}
               </form>
             ) : (
               <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-xl font-bold text-xs shadow-inner flex items-center justify-center gap-2">
-                <img src="/icons/sparkle-star.svg" alt="Done" className="w-4 h-4 object-contain" />
-                All {initialTotalCount} leads have been processed, delivered, and cleared from the queue!
+                <span>🎉</span> All leads have been processed successfully!
               </div>
             )}
           </div>
@@ -1174,6 +1240,7 @@ export default function Home() {
         stats={rejectedStats}
       />
 
+      {/* 🔴 FAILED LEADS MODAL */}
       {showFailedModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
           <div className="bg-slate-900 border border-rose-500/40 w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4">
@@ -1234,7 +1301,6 @@ export default function Home() {
         </div>
       )}
 
-      {/* SpintaxPreviewModal अब सीधे raw template, subject और signoff को props में लेता है */}
       <SpintaxPreviewModal
         isOpen={showPreviewModal}
         onClose={() => setShowPreviewModal(false)}

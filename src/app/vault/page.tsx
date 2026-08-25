@@ -1,4 +1,3 @@
-// src/app/vault/page.tsx
 "use client";
 
 import React, { useState, useEffect } from "react";
@@ -46,7 +45,7 @@ export default function VaultManagerPage() {
   // Password Visibility Toggle Map
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
 
-  // 🎯 STRICT SINGLE-TIER FETCH: केवल उसी एक टियर का डेटा फेच और स्टोर करना
+  // 🎯 STRICT SINGLE-TIER FETCH: केवल उसी एक टियर का डेटा फेच और स्टोर करना (with decrypt=true)
   const fetchOnlyActiveTier = async (tier: ProfileTier, mId: string) => {
     if (!mId) return;
     setLoading(true);
@@ -56,13 +55,17 @@ export default function VaultManagerPage() {
     try {
       const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
-      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(mId)}&tier=${tier}`, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-session-token": savedSession,
-        },
-      });
+      // 🔑 decrypt=true जोड़ा गया है ताकि असली ऐप पासवर्ड ही दिखे
+      const res = await fetch(
+        `/api/smtp-vault?machineId=${encodeURIComponent(mId)}&tier=${tier}&decrypt=true`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "x-session-token": savedSession,
+          },
+        }
+      );
 
       const data = await res.json();
       if (data.accounts) {
