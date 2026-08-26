@@ -6,6 +6,7 @@ export interface ILicense extends Document {
   appDomain: string;
   lockedDeviceId: string | null;
   status: "ACTIVE" | "SUSPENDED";
+  tokenVersion: number; // 👈 फ़ोर्स टोकन इनवैलिडेशन के लिए
   expiresAt: Date;
   lastBoundAt?: Date;
   lastResetAt?: Date;
@@ -35,6 +36,10 @@ export const LicenseSchema = new Schema<ILicense>(
       type: String,
       enum: ["ACTIVE", "SUSPENDED"],
       default: "ACTIVE",
+    },
+    tokenVersion: {
+      type: Number,
+      default: 1, // 👈 नया फ़ील्ड: डिफ़ॉल्ट वर्जन 1 से शुरू होगा
     },
     expiresAt: {
       type: Date,

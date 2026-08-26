@@ -3,8 +3,9 @@ import { NextResponse } from "next/server";
 import { LicenseModel } from "@/lib/models/License";
 import { cleanAppDomain } from "@/lib/licenseGuard";
 import { connectToCentralDB } from "@/lib/db/centralDb";
-import { getTenantDB } from "@/lib/db/tenantDb"; // 👈 टेनेंट डीबी इम्पोर्ट ताकि कैस्केडिंग डिलीट हो सके
-import { SmtpVaultModel, getSmtpVaultModel } from "@/lib/models/SmtpVault"; // 👈 टेनेंट वॉल्ट मॉडल
+import { getTenantDB } from "@/lib/db/tenantDb";
+import { SmtpVaultModel, getSmtpVaultModel } from "@/lib/models/SmtpVault";
+import { forcePurgeLicenseCache } from "@/lib/licenseCache"; // 👈 [FIX] सीधे RAM कैशे इनवैलिडेटर
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
@@ -76,8 +77,11 @@ export async function POST(req: Request) {
         appDomain: targetDomain,
         lockedDeviceId: null,
         status: "ACTIVE",
+        tokenVersion: 1,
         expiresAt: expiry,
       });
+
+      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
 
       return NextResponse.json({
         success: true,
@@ -98,7 +102,10 @@ export async function POST(req: Request) {
       const newExpiry = addMonthsToDate(baseDate, monthsToAdd);
       lic.expiresAt = newExpiry;
       lic.status = "ACTIVE";
+      lic.tokenVersion = (lic.tokenVersion || 1) + 1; // 👈 टोकन वर्जन अपडेट
       await lic.save();
+
+      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
 
       const periodLabel = monthsToAdd === 12 ? "1 Year" : `${monthsToAdd} Month(s)`;
 
@@ -115,7 +122,10 @@ export async function POST(req: Request) {
 
       lic.lockedDeviceId = null;
       lic.lastResetAt = new Date();
+      lic.tokenVersion = (lic.tokenVersion || 1) + 1; // 👈 पुराना टोकन इनवैलिड
       await lic.save();
+
+      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
 
       return NextResponse.json({
         success: true,
@@ -130,7 +140,10 @@ export async function POST(req: Request) {
 
       lic.status = lic.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE";
       lic.lastResetAt = new Date();
+      lic.tokenVersion = (lic.tokenVersion || 1) + 1; // 👈 पुराना टोकन तुरंत इनवैलिड
       await lic.save();
+
+      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
 
       return NextResponse.json({
         success: true,
@@ -144,7 +157,7 @@ export async function POST(req: Request) {
   }
 }
 
-// 3. DELETE (Cascading Delete: सेंट्रल डीबी से लाइसेंस और टेनेंट डीबी से सारा वॉल्ट डेटा साफ़ करना)
+// 3. DELETE (Cascading Delete)
 export async function DELETE(req: Request) {
   try {
     const authHeader = req.headers.get("x-admin-key");
@@ -165,7 +178,6 @@ export async function DELETE(req: Request) {
 
     await connectToCentralDB();
 
-    // 1️⃣ सेंट्रल डीबी से लाइसेंस ढूँढकर हटाओ
     let deletedLicense = null;
     if (targetDomain) {
       deletedLicense = await LicenseModel.findOneAndDelete({ appDomain: targetDomain });
@@ -177,15 +189,12 @@ export async function DELETE(req: Request) {
       return NextResponse.json({ error: "License not found in Central Database." }, { status: 404 });
     }
 
-    // लाइसेंस की यूनिक ID (userId) निकालो
     const resolvedUserId = String(deletedLicense._id);
 
-    // 2️⃣ ⚡ Cascading Clean-up: टेनेंट डीबी से उस userId का सारा SMTP Vault डेटा हमेशा के लिए उड़ाओ!
     try {
       const tenantConn = await getTenantDB();
       const TenantVault = getSmtpVaultModel(tenantConn);
 
-      // userId के आधार पर पूरी तरह डिलीट करो (Fallback के साथ)
       await TenantVault.deleteMany({
         $or: [
           { userId: resolvedUserId },
@@ -194,6 +203,10 @@ export async function DELETE(req: Request) {
       });
     } catch (tenantErr) {
       console.error("Warning: Tenant DB cleanup failed during license deletion:", tenantErr);
+    }
+
+    if (deletedLicense.appDomain) {
+      forcePurgeLicenseCache(deletedLicense.appDomain); // ⚡ कैशे से भी डिलीट
     }
 
     return NextResponse.json({

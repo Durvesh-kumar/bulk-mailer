@@ -2,6 +2,7 @@
 import jwt from "jsonwebtoken";
 import { connectToCentralDB } from "./db/centralDb";
 import { getLicenseModel } from "@/lib/models/License";
+import { getLicenseWithCache, forcePurgeLicenseCache } from "./licenseCache";
 
 const JWT_SECRET: string = process.env.JWT_SECRET_KEY || (() => {
   throw new Error("JWT_SECRET_KEY is missing in environment variables!");
@@ -40,42 +41,15 @@ export async function verifyLicenseAndDevice(
   if (!ENABLE_DEVICE_LOCK) return { ok: true, reason: "ACTIVE", machineId: machineId || undefined };
 
   const appDomain = cleanAppDomain(rawAppDomain);
-  let effectiveMachineId = machineId ? machineId.trim() : "";
-
-  // 🛡️ 12-घंटे का टोकन चेक (अगर टोकन वैलिड है और मशीन मैच है)
-  if (sessionToken && sessionToken !== "SECURE_AUTH") {
-    try {
-      const decoded: any = jwt.verify(sessionToken, JWT_SECRET);
-      if (decoded && decoded.domain === appDomain) {
-        if (!effectiveMachineId && decoded.machineId) {
-          effectiveMachineId = decoded.machineId;
-        }
-
-        if (decoded.machineId === effectiveMachineId) {
-          const resolvedId = String(decoded.userId || decoded.licenseId || appDomain);
-          return { 
-            ok: true, 
-            reason: "ACTIVE", 
-            sessionToken, 
-            machineId: effectiveMachineId,
-            userId: resolvedId,
-            licenseId: resolvedId
-          };
-        }
-      }
-    } catch (e) {
-      // टोकन अमान्य या एक्सपायर होने पर नीचे सेंट्रल DB चेक पर जाएगा
-    }
-  }
+  const effectiveMachineId = machineId ? machineId.trim() : "";
 
   if (!effectiveMachineId) {
-    return { ok: false, reason: "NEW_DEVICE", error: "Hardware fingerprint missing." };
+    return { ok: false, reason: "NEW_DEVICE", error: "Hardware fingerprint missing.", clearClientSession: true };
   }
 
   try {
-    const centralConn = await connectToCentralDB();
-    const License = getLicenseModel(centralConn);
-    const license = await License.findOne({ appDomain });
+    // ⚡ स्टेप 1: सीधे RAM कैशे से उठाओ (0 DB Query)
+    let license = await getLicenseWithCache(appDomain);
 
     if (!license) {
       return {
@@ -86,20 +60,11 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    const formattedExpiry = license.expiresAt 
+    const formattedExpiry = license.expiresAt
       ? new Date(license.expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
       : "N/A";
 
-    if (license.expiresAt && new Date() > new Date(license.expiresAt)) {
-      return {
-        ok: false,
-        reason: "EXPIRED",
-        expiryDate: formattedExpiry,
-        error: `Subscription Expired on ${formattedExpiry}.`,
-        clearClientSession: true,
-      };
-    }
-
+    // ⚡ स्टेप 2: स्टेटस चेक
     if (license.status !== "ACTIVE") {
       return {
         ok: false,
@@ -110,47 +75,85 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    // 🔒 हार्डवेयर बाइंडिंग (अगर खाली है तो तुरंत लॉक करें)
+    // ⚡ स्टेप 3: एक्सपायरी चेक
+    if (license.expiresAt && new Date() > new Date(license.expiresAt)) {
+      return {
+        ok: false,
+        reason: "EXPIRED",
+        expiryDate: formattedExpiry,
+        error: `Subscription Expired on ${formattedExpiry}.`,
+        clearClientSession: true,
+      };
+    }
+
+    // ⚡ स्टेप 4: हार्डवेयर बाइंडिंग & मिसमैच चेक
     if (!license.lockedDeviceId || license.lockedDeviceId.trim() === "") {
+      const centralConn = await connectToCentralDB();
+      const License = getLicenseModel(centralConn);
+      await License.updateOne(
+        { appDomain },
+        { lockedDeviceId: effectiveMachineId, lastBoundAt: new Date() }
+      );
       license.lockedDeviceId = effectiveMachineId;
-      license.lastBoundAt = new Date();
-      await license.save();
+      forcePurgeLicenseCache(appDomain); // नई बाइंडिंग के बाद कैशे रिफ्रेश
     } else if (license.lockedDeviceId !== effectiveMachineId) {
       return {
         ok: false,
         reason: "NEW_DEVICE",
         expiryDate: formattedExpiry,
-        error: "New Device detected on this domain. Please contact Admin.",
+        error: "Device mismatch! Please contact Admin to reset your hardware binding.",
         clearClientSession: true,
       };
     }
 
+    // ⚡ स्टेप 5: 24-घंटे का JWT और टोकन वर्जन मैच
+    const currentVersion = license.tokenVersion || 1;
     const resolvedUserId = String(license._id);
+    let shouldGenerateNewToken = true;
+    let finalSessionToken = sessionToken || "";
 
-    // 🎯 नया 12-घंटे का JWT टोकन (पेलोड में userId और licenseId जोड़ दिया)
-    const newSessionToken = jwt.sign(
-      { 
-        domain: appDomain, 
-        machineId: effectiveMachineId,
-        userId: resolvedUserId,
-        licenseId: resolvedUserId 
-      },
-      JWT_SECRET,
-      { expiresIn: "12h" }
-    );
+    if (sessionToken && sessionToken !== "SECURE_AUTH") {
+      try {
+        const decoded: any = jwt.verify(sessionToken, JWT_SECRET);
+        if (
+          decoded &&
+          decoded.domain === appDomain &&
+          decoded.machineId === effectiveMachineId &&
+          decoded.tokenVersion === currentVersion // अगर एडमिन ने वर्जन बदला, तो यह फेल होगा
+        ) {
+          shouldGenerateNewToken = false;
+        }
+      } catch {
+        shouldGenerateNewToken = true;
+      }
+    }
 
-    return { 
-      ok: true, 
-      reason: "ACTIVE", 
-      sessionToken: newSessionToken, 
+    // ⚡ स्टेप 6: अगर टोकन नहीं है या एडमिन ने फ़ोर्स अपडेट किया है -> नया 24-घंटे का टोकन
+    if (shouldGenerateNewToken) {
+      finalSessionToken = jwt.sign(
+        {
+          domain: appDomain,
+          machineId: effectiveMachineId,
+          userId: resolvedUserId,
+          licenseId: resolvedUserId,
+          tokenVersion: currentVersion, // टोकन में वर्जन एम्बेड
+        },
+        JWT_SECRET,
+        { expiresIn: "24h" }
+      );
+    }
+
+    return {
+      ok: true,
+      reason: "ACTIVE",
+      sessionToken: finalSessionToken,
       machineId: effectiveMachineId,
       userId: resolvedUserId,
       licenseId: resolvedUserId,
-      expiryDate: formattedExpiry 
+      expiryDate: formattedExpiry,
     };
-
   } catch (err: any) {
-    console.error("Central DB License Check Failed:", err);
+    console.error("License check error:", err);
     return { ok: false, reason: "DB_ERROR", error: "Database Error: " + err.message };
   }
 }

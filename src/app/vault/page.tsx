@@ -9,7 +9,7 @@ export type ProfileTier = "CURRENT" | "YEAR_1" | "YEAR_2" | "YEAR_4" | "YEAR_6";
 interface SmtpAccount {
   _id: string;
   email: string;
-  appPassword: string;
+  appPassword: string; // एन्क्रिप्टेड सिफरटेक्स्ट
   senderName: string;
   profileTier: ProfileTier;
 }
@@ -28,12 +28,11 @@ const SESSION_TOKEN_KEY = "reachout_daily_session_token";
 
 export default function VaultManagerPage() {
   const [machineId, setMachineId] = useState("");
-  // 🎯 इसमें कभी भी सारा डेटा नहीं रहेगा - सिर्फ और सिर्फ एक्टिव टैब का डेटा रहेगा
   const [activeTierAccounts, setActiveTierAccounts] = useState<SmtpAccount[]>([]);
   const [activeTab, setActiveTab] = useState<ProfileTier>("YEAR_2");
   const [loading, setLoading] = useState(false);
 
-  // Search state (सिर्फ एक्टिव टियर के अंदर)
+  // Search state
   const [searchQuery, setSearchQuery] = useState("");
 
   // Form State (Add / Edit)
@@ -41,23 +40,24 @@ export default function VaultManagerPage() {
   const [appPassword, setAppPassword] = useState("");
   const [senderName, setSenderName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [showFormPassword, setShowFormPassword] = useState(false);
 
-  // Password Visibility Toggle Map
-  const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
+  // Password Reveal (On-Demand Decrypted Store) & Copy State
+  const [revealedPasswords, setRevealedPasswords] = useState<Record<string, string>>({});
+  const [loadingRevealId, setLoadingRevealId] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // 🎯 STRICT SINGLE-TIER FETCH: केवल उसी एक टियर का डेटा फेच और स्टोर करना (with decrypt=true)
+  // 🎯 STRICT SINGLE-TIER FETCH (GET Method - Returns Ciphertexts safely)
   const fetchOnlyActiveTier = async (tier: ProfileTier, mId: string) => {
     if (!mId) return;
     setLoading(true);
-    // पहले की मेमोरी तुरंत साफ़ ताकि RAM 100% खाली रहे
     setActiveTierAccounts([]);
 
     try {
       const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
-      // 🔑 decrypt=true जोड़ा गया है ताकि असली ऐप पासवर्ड ही दिखे
       const res = await fetch(
-        `/api/smtp-vault?machineId=${encodeURIComponent(mId)}&tier=${tier}&decrypt=true`,
+        `/api/smtp-vault?machineId=${encodeURIComponent(mId)}&tier=${tier}`,
         {
           method: "GET",
           headers: {
@@ -69,7 +69,6 @@ export default function VaultManagerPage() {
 
       const data = await res.json();
       if (data.accounts) {
-        // सिर्फ इस एक टियर के अकाउंट्स स्टेट में गए
         setActiveTierAccounts(data.accounts);
       }
     } catch (e) {
@@ -79,7 +78,6 @@ export default function VaultManagerPage() {
     }
   };
 
-  // पेज लोड होते ही सिर्फ डिफ़ॉल्ट टियर (YEAR_2) का डेटा फेच होगा
   useEffect(() => {
     async function init() {
       const mId = await getClientMachineId();
@@ -91,7 +89,6 @@ export default function VaultManagerPage() {
     init();
   }, []);
 
-  // 🎯 जब भी किसी टैब पर क्लिक होगा: पुराना डेटा डंप होगा और सिर्फ उस टैब का डेटा आएगा
   const handleTabClick = (tier: ProfileTier) => {
     setActiveTab(tier);
     setSearchQuery("");
@@ -100,21 +97,132 @@ export default function VaultManagerPage() {
     }
   };
 
-  const togglePasswordVisibility = (id: string) => {
-    setVisiblePasswords((prev) => ({
-      ...prev,
-      [id]: !prev[id],
-    }));
+  // 👁️ ऑन-डिमांड पासवर्ड डिक्रिप्शन हैंडलर (Zero DB Call)
+  const togglePasswordVisibility = async (accId: string, encryptedPass: string) => {
+    // अगर पहले से अनमास्क है, तो मास्क कर दें
+    if (revealedPasswords[accId]) {
+      setRevealedPasswords((prev) => {
+        const copy = { ...prev };
+        delete copy[accId];
+        return copy;
+      });
+      return;
+    }
+
+    // अगर पहले से अनएन्क्रिप्टेड प्लेन टेक्स्ट है (लोकल फॉलबैक)
+    if (!encryptedPass.includes(":")) {
+      setRevealedPasswords((prev) => ({ ...prev, [accId]: encryptedPass }));
+      return;
+    }
+
+    setLoadingRevealId(accId);
+    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
+    try {
+      const res = await fetch("/api/smtp-vault", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          machineId,
+          sessionToken: savedSession,
+          action: "DECRYPT",
+          encryptedPassword: encryptedPass,
+        }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.decryptedPassword) {
+        setRevealedPasswords((prev) => ({
+          ...prev,
+          [accId]: data.decryptedPassword,
+        }));
+      } else {
+        alert(`⚠️ ${data.error || "Failed to decrypt password."}`);
+      }
+    } catch {
+      alert("Network error while decrypting.");
+    } finally {
+      setLoadingRevealId(null);
+    }
   };
 
-  // Create (POST) या Partial Edit (PATCH)
+  // 📋 Gmail ID + डिक्रिप्टेड पासवर्ड क्लिपबोर्ड कॉपी
+  const copyCredentials = async (id: string, emailStr: string, encPassStr: string) => {
+    let plainPass = revealedPasswords[id];
+
+    if (!plainPass) {
+      if (!encPassStr.includes(":")) {
+        plainPass = encPassStr;
+      } else {
+        try {
+          const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+          const res = await fetch("/api/smtp-vault", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              machineId,
+              sessionToken: savedSession,
+              action: "DECRYPT",
+              encryptedPassword: encPassStr,
+            }),
+          });
+          const data = await res.json();
+          if (res.ok && data.decryptedPassword) {
+            plainPass = data.decryptedPassword;
+            setRevealedPasswords((prev) => ({ ...prev, [id]: data.decryptedPassword }));
+          }
+        } catch {
+          // fallback
+        }
+      }
+    }
+
+    const textToCopy = `Email: ${emailStr}\nApp Password: ${plainPass || encPassStr}`;
+    navigator.clipboard.writeText(textToCopy);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // 🛡️ Helper: App Password Strict Validator (16 Letters)
+  const validateAppPassword = (pwd: string): boolean => {
+    const clean = pwd.replace(/\s+/g, "").toLowerCase();
+    return /^[a-z]{16}$/.test(clean);
+  };
+
+  // Create (POST) or Partial Edit (PATCH)
   const handleSaveAccount = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !appPassword || !senderName || !machineId) return;
+    if (!email || !senderName || !machineId) return;
+
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanSenderName = senderName.trim();
+    const rawPassword = appPassword.trim();
+    const sanitizedPassword = rawPassword.replace(/\s+/g, "").toLowerCase();
+
+    if (!editingId) {
+      if (!validateAppPassword(rawPassword)) {
+        alert("Invalid App Password!\nGoogle App Passwords must be exactly 16 letters (e.g. 'abcd efgh ijkl mnop' or 'abcdefghijklmnop'). Numbers and special characters are not allowed.");
+        return;
+      }
+    } else {
+      if (rawPassword.length > 0 && !validateAppPassword(rawPassword)) {
+        alert("Invalid App Password!\nGoogle App Passwords must be exactly 16 letters (e.g. 'abcd efgh ijkl mnop').");
+        return;
+      }
+    }
 
     const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
     if (editingId) {
+      const updatePayload: Record<string, any> = {
+        senderName: cleanSenderName,
+        profileTier: activeTab,
+      };
+
+      if (rawPassword.length > 0) {
+        updatePayload.appPassword = sanitizedPassword;
+      }
+
       const res = await fetch("/api/smtp-vault", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -123,11 +231,7 @@ export default function VaultManagerPage() {
           sessionToken: savedSession,
           accountId: editingId,
           updateType: "EDIT",
-          updateData: {
-            senderName,
-            appPassword,
-            profileTier: activeTab,
-          },
+          updateData: updatePayload,
         }),
       });
 
@@ -145,11 +249,10 @@ export default function VaultManagerPage() {
         body: JSON.stringify({
           machineId,
           sessionToken: savedSession,
-          domain: window.location.hostname,
           accountData: {
-            email,
-            appPassword,
-            senderName,
+            email: cleanEmail,
+            appPassword: sanitizedPassword,
+            senderName: cleanSenderName,
             profileTier: activeTab,
           },
         }),
@@ -170,7 +273,7 @@ export default function VaultManagerPage() {
   const handleStartEdit = (acc: SmtpAccount) => {
     setEditingId(acc._id);
     setEmail(acc.email);
-    setAppPassword(acc.appPassword);
+    setAppPassword("");
     setSenderName(acc.senderName);
     setActiveTab(acc.profileTier);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -207,7 +310,6 @@ export default function VaultManagerPage() {
 
     const data = await res.json();
     if (res.ok) {
-      // अपग्रेड होने के बाद सिर्फ एक्टिव टियर को री-फेच करना
       fetchOnlyActiveTier(activeTab, machineId);
     } else {
       alert(data.error || "Failed to upgrade tier");
@@ -237,7 +339,6 @@ export default function VaultManagerPage() {
     }
   };
 
-  // सिर्फ एक्टिव टियर के अंदर सर्च
   const displayedAccounts = activeTierAccounts.filter((a) => {
     const q = searchQuery.toLowerCase().trim();
     return !q || a.email.toLowerCase().includes(q) || a.senderName.toLowerCase().includes(q);
@@ -289,12 +390,13 @@ export default function VaultManagerPage() {
           })}
         </div>
 
-        {/* 🔍 Search Bar (Only Active Tier) */}
+        {/* 🔍 Search Bar */}
         <div className="bg-slate-900/90 border border-slate-800 p-4 rounded-2xl flex flex-col sm:flex-row items-center gap-3 shadow-lg">
           <div className="relative flex-1 w-full">
             <span className="absolute left-3.5 top-2.5 text-slate-500 text-xs">🔍</span>
             <input
               type="text"
+              autoComplete="off"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={`Search within ${TIER_LABELS[activeTab].badge} accounts...`}
@@ -316,7 +418,11 @@ export default function VaultManagerPage() {
         </div>
 
         {/* Add / Edit Senders Form */}
-        <form onSubmit={handleSaveAccount} className="bg-slate-900/90 border border-slate-800 p-5 rounded-3xl space-y-4 shadow-xl">
+        <form 
+          onSubmit={handleSaveAccount} 
+          autoComplete="off"
+          className="bg-slate-900/90 border border-slate-800 p-5 rounded-3xl space-y-4 shadow-xl"
+        >
           <div className="flex justify-between items-center">
             <h2 className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
               <img src="/icons/sparkle-star.svg" alt="Star" className="w-3.5 h-3.5 object-contain" />
@@ -328,26 +434,47 @@ export default function VaultManagerPage() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {/* Sender Gmail ID */}
             <input
               type="email"
               required
               disabled={!!editingId}
+              autoComplete="off"
+              data-lpignore="true"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="Sender Gmail ID (e.g. outreach1@gmail.com)"
               className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500 disabled:opacity-50"
             />
+            
+            {/* App Password Input */}
+            <div className="relative flex items-center">
+              <input
+                type={showFormPassword ? "text" : "password"}
+                required={!editingId}
+                autoComplete="new-password"
+                data-lpignore="true"
+                value={appPassword}
+                onChange={(e) => setAppPassword(e.target.value)}
+                placeholder={editingId ? "Leave blank to keep same password" : "16-Letter App Password (xxxx xxxx xxxx xxxx)"}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-3 pr-8 py-2 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
+              />
+              <button
+                type="button"
+                onClick={() => setShowFormPassword((prev) => !prev)}
+                className="absolute right-2.5 text-xs text-slate-400 hover:text-white cursor-pointer"
+                title={showFormPassword ? "Hide" : "Show"}
+              >
+                {showFormPassword ? "🙈" : "👁️"}
+              </button>
+            </div>
+
+            {/* Display Name */}
             <input
               type="text"
               required
-              value={appPassword}
-              onChange={(e) => setAppPassword(e.target.value)}
-              placeholder="16-Digit App Password (xxxx xxxx xxxx xxxx)"
-              className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
-            />
-            <input
-              type="text"
-              required
+              autoComplete="off"
+              data-lpignore="true"
               value={senderName}
               onChange={(e) => setSenderName(e.target.value)}
               placeholder="Display Name (e.g. Sales Team)"
@@ -397,7 +524,10 @@ export default function VaultManagerPage() {
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               {displayedAccounts.map((acc) => {
-                const isPassVisible = !!visiblePasswords[acc._id];
+                const isRevealed = !!revealedPasswords[acc._id];
+                const isRevealing = loadingRevealId === acc._id;
+                const isCopied = copiedId === acc._id;
+
                 return (
                   <div
                     key={acc._id}
@@ -416,18 +546,41 @@ export default function VaultManagerPage() {
                         Sender Name: <span className="text-slate-200 font-medium">{acc.senderName}</span>
                       </p>
 
-                      <div className="flex items-center gap-2 bg-slate-900/80 px-2.5 py-1 rounded-lg border border-slate-800/80 w-fit">
+                      <div className="flex items-center gap-2 bg-slate-900/80 px-2.5 py-1.5 rounded-lg border border-slate-800/80 w-fit">
                         <span className="text-[10px] text-slate-400 font-mono">Password:</span>
                         <span className="text-xs font-mono font-bold text-amber-300">
-                          {isPassVisible ? acc.appPassword : "•••• •••• •••• ••••"}
+                          {isRevealed ? revealedPasswords[acc._id] : "•••• •••• •••• ••••"}
                         </span>
+                        
+                        {/* 👁️ Eye Reveal Button (On-Demand Decrypt) */}
                         <button
                           type="button"
-                          onClick={() => togglePasswordVisibility(acc._id)}
-                          className="text-slate-400 hover:text-white text-xs cursor-pointer ml-1"
-                          title={isPassVisible ? "Hide Password" : "Show Password"}
+                          disabled={isRevealing}
+                          onClick={() => togglePasswordVisibility(acc._id, acc.appPassword)}
+                          className="text-slate-400 hover:text-white text-xs cursor-pointer ml-1 transition"
+                          title={isRevealed ? "Hide Password" : "Show Password"}
                         >
-                          {isPassVisible ? "🙈" : "👁️"}
+                          {isRevealing ? (
+                            <span className="animate-spin inline-block text-[10px]">⏳</span>
+                          ) : isRevealed ? (
+                            "🙈"
+                          ) : (
+                            "👁️"
+                          )}
+                        </button>
+                        
+                        {/* 📋 Gmail ID + Password Copy Button */}
+                        <button
+                          type="button"
+                          onClick={() => copyCredentials(acc._id, acc.email, acc.appPassword)}
+                          className={`text-[11px] px-2 py-0.5 rounded-md cursor-pointer transition ml-1 flex items-center gap-1 font-medium ${
+                            isCopied
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                              : "bg-slate-800 text-slate-300 hover:text-indigo-300 hover:bg-slate-700 border border-slate-700/60"
+                          }`}
+                          title="Copy Gmail ID & App Password"
+                        >
+                          {isCopied ? "✓ Copied" : "📋 Copy"}
                         </button>
                       </div>
                     </div>

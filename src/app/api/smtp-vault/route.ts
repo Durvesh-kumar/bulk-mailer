@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 import { getTenantDB } from "@/lib/db/tenantDb";
 import { getSmtpVaultModel, ProfileTier } from "@/lib/models/SmtpVault";
-import { encryptPassword, decryptPassword } from "@/lib/encryption";
+import { encryptPassword } from "@/lib/encryption";
 
 // 🛡️ Strict Security Gatekeeper Helper
 async function enforceSecurity(req: Request, machineId: string | null | undefined, sessionToken?: string | null) {
@@ -22,7 +22,7 @@ async function enforceSecurity(req: Request, machineId: string | null | undefine
     };
   }
 
-  // 🎯 लाइसेंस से यूनिक userId निकालना (Fallback to licenseId या domain)
+  // 🎯 लाइसेंस से यूनिक userId निकालना
   const resolvedUserId = String(guard.licenseId || guard.userId || clientDomain);
 
   return { 
@@ -34,14 +34,13 @@ async function enforceSecurity(req: Request, machineId: string | null | undefine
   };
 }
 
-// 1. GET
+// 1. GET (Fetch Accounts - Returns Safe Encrypted Ciphertext Only)
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const machineId = searchParams.get("machineId");
     const sessionToken = req.headers.get("x-session-token");
     const requestedTier = searchParams.get("tier");
-    const checkCooldown = searchParams.get("checkCooldown") === "true";
 
     const auth = await enforceSecurity(req, machineId, sessionToken);
     if (!auth.allowed) {
@@ -51,52 +50,27 @@ export async function GET(req: Request) {
     const db = await getTenantDB();
     const VaultModel = getSmtpVaultModel(db);
 
-    // 🎯 अब डेटाबेस में सिर्फ userId पर फिल्टर होगा
     const vault = await VaultModel.findOne(
       { userId: auth.userId },
       { accounts: 1 }
     ).lean();
 
-    if (!vault || !vault.accounts) {
+    if (!vault || !vault.accounts || vault.accounts.length === 0) {
       return NextResponse.json({ accounts: [], sessionToken: auth.sessionToken });
     }
 
-    // 🎯 हमेशा पासवर्ड को पूरी तरह डिक्रिप्ट करके 16-अक्षर का पासवर्ड ही दें
-    let accounts = vault.accounts.map((acc: any) => {
-      let clearPass = acc.appPassword;
-      try {
-        clearPass = decryptPassword(acc.appPassword);
-      } catch (e) {
-        clearPass = acc.appPassword;
-      }
-      return {
-        ...acc,
-        appPassword: clearPass,
-      };
-    });
+    // 🔒 नो डिक्रिप्शन इन ब्राउज़र: पासवर्ड हमेशा एन्क्रिप्टेड सिफरटेक्स्ट रहेगा
+    let accounts = vault.accounts.map((acc: any) => ({
+      _id: String(acc._id),
+      email: acc.email,
+      senderName: acc.senderName,
+      profileTier: acc.profileTier,
+      appPassword: acc.appPassword,
+      lastSentAt: acc.lastSentAt ? new Date(acc.lastSentAt).toISOString() : null,
+    }));
 
     if (requestedTier && requestedTier !== "ALL") {
       accounts = accounts.filter((a: any) => a.profileTier === requestedTier);
-    }
-
-    if (checkCooldown) {
-      const now = new Date().getTime();
-      const COOL_DOWN_PERIOD = 24 * 60 * 60 * 1000;
-
-      accounts = accounts.map((acc: any) => {
-        if (acc.lastSentAt) {
-          const lastSentTime = new Date(acc.lastSentAt).getTime();
-          const timeDiff = now - lastSentTime;
-          if (timeDiff < COOL_DOWN_PERIOD) {
-            return { 
-              ...acc, 
-              isCoolingDown: true, 
-              remainingHours: Math.ceil((COOL_DOWN_PERIOD - timeDiff) / (1000 * 60 * 60)) 
-            };
-          }
-        }
-        return { ...acc, isCoolingDown: false };
-      });
     }
 
     return NextResponse.json({ accounts, sessionToken: auth.sessionToken });
@@ -106,7 +80,7 @@ export async function GET(req: Request) {
   }
 }
 
-// 2. POST
+// 2. POST (Add New Smtp Account Only)
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -124,7 +98,6 @@ export async function POST(req: Request) {
     const db = await getTenantDB();
     const VaultModel = getSmtpVaultModel(db);
 
-    // 🎯 userId के आधार पर वॉल्ट ढूंढो या नया बनाओ
     let vault = await VaultModel.findOne({ userId: auth.userId });
 
     if (!vault) {
@@ -135,12 +108,14 @@ export async function POST(req: Request) {
     }
 
     const email = accountData.email.toLowerCase().trim();
-    const exists = vault.accounts.some((a: any) => a.email === email);
+
+    // 🛡️ Case-insensitive email duplicate check
+    const exists = vault.accounts.some((a: any) => a.email?.toLowerCase().trim() === email);
     if (exists) {
       return NextResponse.json({ error: "This Gmail ID already exists in your private vault." }, { status: 400 });
     }
 
-    let cleanAppPassword = accountData.appPassword.replace(/\s+/g, "");
+    const cleanAppPassword = accountData.appPassword.replace(/\s+/g, "");
     let secureEncryptedPassword = "";
     try {
       secureEncryptedPassword = encryptPassword(cleanAppPassword);
@@ -165,7 +140,7 @@ export async function POST(req: Request) {
   }
 }
 
-// 3. PATCH
+// 3. PATCH (Update Account or Timestamps)
 export async function PATCH(req: Request) {
   try {
     const body = await req.json();
@@ -179,29 +154,44 @@ export async function PATCH(req: Request) {
     const db = await getTenantDB();
     const VaultModel = getSmtpVaultModel(db);
 
+    // 🛡️ Bulk Timestamp Update (फ्रंटएंड टाइमस्टैम्प सिंक)
     if (updateType === "BULK_UPDATE_TIMESTAMP") {
-      const emailsToUpdate = updateData?.emails || [];
-      if (emailsToUpdate.length > 0) {
-        const vault = await VaultModel.findOne({ userId: auth.userId });
-        if (vault) {
-          for (const email of emailsToUpdate) {
-            const acc: any = vault.accounts.find((a: any) => a.email === email.toLowerCase().trim());
-            if (acc && acc.lastSentAt) {
-              const diff = new Date().getTime() - new Date(acc.lastSentAt).getTime();
-              if (diff < 24 * 60 * 60 * 1000) {
-                return NextResponse.json({ error: `Account ${email} is still in 24-hour cool-down period!` }, { status: 400 });
-              }
-            }
-          }
-        }
+      const records: Array<{ email: string; sentAt?: string | Date }> =
+        updateData?.records ||
+        (updateData?.emails || []).map((e: string) => ({ email: e, sentAt: new Date() }));
 
-        await VaultModel.updateOne(
-          { userId: auth.userId },
-          { $set: { "accounts.$[elem].lastSentAt": new Date() } },
-          { arrayFilters: [{ "elem.email": { $in: emailsToUpdate.map((e: string) => e.toLowerCase().trim()) } }] }
-        );
+      if (records.length > 0) {
+        const bulkOps = records
+          .filter((r) => r.email && typeof r.email === "string")
+          .map((r) => {
+            const cleanEmail = r.email.toLowerCase().trim();
+            const timestamp = r.sentAt ? new Date(r.sentAt) : new Date();
+
+            return {
+              updateOne: {
+                filter: {
+                  userId: auth.userId,
+                  "accounts.email": cleanEmail,
+                },
+                update: {
+                  $set: {
+                    "accounts.$.lastSentAt": timestamp,
+                  },
+                },
+              },
+            };
+          });
+
+        if (bulkOps.length > 0) {
+          await VaultModel.bulkWrite(bulkOps);
+        }
       }
-      return NextResponse.json({ success: true, message: "Bulk cool-down timestamps updated successfully!", sessionToken: auth.sessionToken });
+
+      return NextResponse.json({
+        success: true,
+        message: "Timestamps synced successfully!",
+        sessionToken: auth.sessionToken,
+      });
     }
 
     if (!accountId) {
@@ -210,18 +200,30 @@ export async function PATCH(req: Request) {
 
     const setQuery: Record<string, any> = {};
 
-    if (updateType === "EDIT") {
-      if (updateData.senderName) setQuery["accounts.$.senderName"] = updateData.senderName.trim();
-      
-      // 🛡️ केवल तभी एन्क्रिप्ट करो जब यूजर ने सच में नया पासवर्ड भरा हो
-      if (updateData.appPassword && updateData.appPassword.trim().length > 0) {
+    if (updateType === "EDIT" && updateData) {
+      if (updateData.senderName && updateData.senderName.trim()) {
+        setQuery["accounts.$.senderName"] = updateData.senderName.trim();
+      }
+
+      if (
+        updateData.appPassword &&
+        updateData.appPassword.trim().length > 0 &&
+        !updateData.appPassword.includes("•") &&
+        !updateData.appPassword.includes("*")
+      ) {
         const cleanPwd = updateData.appPassword.replace(/\s+/g, "");
         setQuery["accounts.$.appPassword"] = encryptPassword(cleanPwd);
       }
-      
-      if (updateData.profileTier) setQuery["accounts.$.profileTier"] = updateData.profileTier as ProfileTier;
-    } else if (updateType === "UPGRADE_TIER") {
+
+      if (updateData.profileTier) {
+        setQuery["accounts.$.profileTier"] = updateData.profileTier as ProfileTier;
+      }
+    } else if (updateType === "UPGRADE_TIER" && updateData?.targetTier) {
       setQuery["accounts.$.profileTier"] = updateData.targetTier as ProfileTier;
+    }
+
+    if (Object.keys(setQuery).length === 0) {
+      return NextResponse.json({ success: true, message: "No fields modified.", sessionToken: auth.sessionToken });
     }
 
     const updatedVault = await VaultModel.findOneAndUpdate(
@@ -244,7 +246,7 @@ export async function PATCH(req: Request) {
   }
 }
 
-// 4. DELETE
+// 4. DELETE (Remove Smtp Account)
 export async function DELETE(req: Request) {
   try {
     const body = await req.json();

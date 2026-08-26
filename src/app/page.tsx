@@ -76,13 +76,18 @@ export default function Home() {
   const [rotationMode, setRotationMode] = useState<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
   const [pauseAfterNSenders, setPauseAfterNSenders] = useState<number>(2);
 
-  // Live Mutable Refs for seamless Pause & Resume without stale closures
+  // Live Mutable Refs
   const isStopRequestedRef = useRef(false);
   const subjectRef = useRef("");
   const templateRef = useRef("");
   const customSignoffNameRef = useRef("");
   const rotationModeRef = useRef<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
   const pauseAfterNSendersRef = useRef<number>(2);
+
+  // 🎯 Trackers: प्रति सेंडर भेजे गए मेल + टाइमस्टैम्प + ग्रुप एग्जॉस्ट काउंट
+  const senderSentCountRef = useRef<Record<string, number>>({});
+  const senderProcessedTimesRef = useRef<Record<string, string>>({});
+  const completedSendersCountRef = useRef<number>(0);
 
   useEffect(() => { subjectRef.current = subject; }, [subject]);
   useEffect(() => { templateRef.current = template; }, [template]);
@@ -110,29 +115,45 @@ export default function Home() {
 
   const [showPreviewModal, setShowPreviewModal] = useState(false);
 
+  // 🛡️ REFRESH & REAL-TIME HARDWARE / LICENSE VERIFICATION
   useEffect(() => {
     async function initSecurityAndLicense() {
       try {
         const currentDomain = window.location.hostname;
         setAppDomain(currentDomain);
+        
         const currentMachineId = await getClientMachineId();
         setMachineId(currentMachineId);
 
-        const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+        const existingSessionToken = localStorage.getItem(SESSION_TOKEN_KEY);
+
         const res = await fetch("/api/check-license", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ machineId: currentMachineId, domain: currentDomain, sessionToken: savedSession }),
+          headers: { 
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache"
+          },
+          body: JSON.stringify({ 
+            machineId: currentMachineId, 
+            domain: currentDomain,
+            sessionToken: existingSessionToken,
+          }),
         });
 
         const data = await res.json();
+
         if (!res.ok || !data.allowed) {
+          if (data.clearSession) {
+            localStorage.removeItem(SESSION_TOKEN_KEY);
+          }
           setIsSuspended(true);
           setUserType(data.reason === "EXPIRED" ? "EXPIRED" : data.reason === "SUSPENDED" ? "SUSPENDED" : "NEW_USER");
           if (data.expiryDate) setExpiryDate(data.expiryDate);
         } else {
           setIsSuspended(false);
-          if (data.sessionToken) localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          if (data.sessionToken) {
+            localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          }
 
           try {
             const savedQueue = localStorage.getItem(PENDING_QUEUE_STORAGE_KEY);
@@ -150,17 +171,20 @@ export default function Home() {
             console.error("Queue restore error:", e);
           }
         }
-      } catch {
+      } catch (err) {
+        console.error("License check failed:", err);
+        localStorage.removeItem(SESSION_TOKEN_KEY);
         setIsSuspended(true);
         setUserType("NEW_USER");
       } finally {
         setLoadingLicense(false);
       }
     }
+
     initSecurityAndLicense();
   }, []);
 
-  // 🛡️ Helper: Check if sender is under 24-hour cooldown
+  // 🛡️ 24-घंटे का कूलडाउन चेक
   const isSenderInCooldown = (email: string): boolean => {
     try {
       const cooldownMap = JSON.parse(localStorage.getItem(SENDERS_COOLDOWN_STORAGE_KEY) || "{}");
@@ -173,11 +197,16 @@ export default function Home() {
     }
   };
 
-  // 🛡️ Helper: Mark sender as used (Set Cooldown Timestamp)
-  const markSenderUsed = (email: string) => {
+  // 🛡️ पूरा लॉट खत्म होने पर सेंडर पर 24 घंटे का ताला लगाना
+  const markSenderLotCompleted = (email: string) => {
     try {
+      const nowMs = Date.now();
+      const isoTime = new Date(nowMs).toISOString();
+
+      senderProcessedTimesRef.current[email.toLowerCase()] = isoTime;
+
       const cooldownMap = JSON.parse(localStorage.getItem(SENDERS_COOLDOWN_STORAGE_KEY) || "{}");
-      cooldownMap[email.toLowerCase()] = Date.now();
+      cooldownMap[email.toLowerCase()] = nowMs;
       localStorage.setItem(SENDERS_COOLDOWN_STORAGE_KEY, JSON.stringify(cooldownMap));
     } catch (e) {
       console.error("Cooldown save error:", e);
@@ -199,8 +228,6 @@ export default function Home() {
       const data = await res.json();
       if (data.accounts && data.accounts.length > 0) {
         const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
-        
-        // Filter out accounts currently in 24-hour cooldown
         const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email));
 
         if (availableAccounts.length > 0) {
@@ -280,7 +307,6 @@ export default function Home() {
     setTimeout(() => setCopiedType(null), 2500);
   };
 
-  // 🛑 PAUSE / STOP: कहीं भी कैंपेन रोककर टेम्पलेट/सब्जेक्ट बदलने की पूरी आजादी देता है
   const handleStopCampaign = () => {
     isStopRequestedRef.current = true;
     setLoading(false);
@@ -317,9 +343,15 @@ export default function Home() {
     }
 
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+    const targetLotSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
 
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
+
+    // Reset trackers
+    senderSentCountRef.current = {};
+    senderProcessedTimesRef.current = {};
+    completedSendersCountRef.current = 0;
+    activeSenders.forEach(s => { senderSentCountRef.current[s.email.toLowerCase()] = 0; });
 
     setPendingEmails(result.validEmails);
     setInitialTotalCount(result.validEmails.length);
@@ -338,7 +370,7 @@ export default function Home() {
       0,
       0,
       0,
-      safeBatchSize,
+      targetLotSize,
       accountAgeMode,
       senderEmail.trim().toLowerCase(),
       appPassword.replace(/\s+/g, ""),
@@ -346,7 +378,7 @@ export default function Home() {
     );
   };
 
-  // 🚀 Fully Automated Non-Stop Batch Pipeline with 1-by-1 Continuous Mode & Live Editing Support
+  // 🎯 मुख्य यूनिवर्सल डिस्पैचर
   const consumeQueueBatch = async (
     currentQueue: string[],
     sendersList: SmtpAccount[],
@@ -354,19 +386,49 @@ export default function Home() {
     roundsDone: number,
     currentProcessed: number,
     currentSuccess: number,
-    bSize: number,
+    targetLotSize: number,
     mode: AccountAgeMode,
     activeEmail: string,
     activePass: string,
     activeName: string
   ) => {
-    if (isStopRequestedRef.current || currentQueue.length === 0) {
+    if (isStopRequestedRef.current || currentQueue.length === 0 || sendersList.length === 0) {
       setLoading(false);
       setProgressStatus("");
-      if (currentQueue.length === 0) {
-        setIsCampaignStarted(false);
-        localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
-        alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
+      
+      // DB में सभी का सटीक टाइम सिंक करें
+      if (currentQueue.length === 0 || sendersList.length === 0) {
+        let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+        try {
+          const recordedEntries = Object.entries(senderProcessedTimesRef.current);
+          if (recordedEntries.length > 0) {
+            const recordsPayload = recordedEntries.map(([email, sentAt]) => ({ email, sentAt }));
+            await fetch("/api/smtp-vault", {
+              method: "PATCH",
+              headers: { 
+                "Content-Type": "application/json",
+                "x-session-token": latestSessionToken 
+              },
+              body: JSON.stringify({
+                machineId,
+                sessionToken: latestSessionToken,
+                updateType: "BULK_UPDATE_TIMESTAMP",
+                updateData: { records: recordsPayload }
+              })
+            });
+          }
+        } catch (e) {
+          console.error("Timestamp Bulk Sync Error:", e);
+        }
+
+        if (currentQueue.length === 0) {
+          setIsCampaignStarted(false);
+          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+          setRawSheetData("");
+          alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
+        } else {
+          alert(`⚠️ All active sender accounts have completed their lot size (${targetLotSize} emails each)!`);
+        }
       }
       return;
     }
@@ -375,9 +437,17 @@ export default function Home() {
     setLastBatchMessage("");
     let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
     
-    // Continuous = 1-by-1 | Every N Senders / Every Sender Turn = Target Batch Size
-    const isSingleShot = rotationModeRef.current === "CONTINUOUS";
-    const actualBatchLimit = isSingleShot ? 1 : bSize;
+    // 🎯 मोड चयन:
+    // Button 3 (EVERY_SINGLE_SENDER): एक सेंडर से उसका पूरा बचा हुआ लॉट एक साथ चंक्स में
+    // Button 1 (CONTINUOUS) & Button 2 (EVERY_N_SENDERS): 1-बाय-1 सच्चा राउंड-रॉबिन
+    const isSingleSenderFullLot = rotationModeRef.current === "EVERY_SINGLE_SENDER";
+    const currentSenderCurrentSent = senderSentCountRef.current[activeEmail.toLowerCase()] || 0;
+    const remainingLotForThisSender = Math.max(1, targetLotSize - currentSenderCurrentSent);
+
+    const actualBatchLimit = isSingleSenderFullLot 
+      ? Math.min(remainingLotForThisSender, currentQueue.length)
+      : 1;
+
     const batchToSend = currentQueue.slice(0, actualBatchLimit);
     const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 8;
 
@@ -390,10 +460,9 @@ export default function Home() {
         if (isStopRequestedRef.current) break;
 
         const chunk = batchToSend.slice(i, i + activeChunkSize);
-        const startNum = i + 1;
-        const endNum = Math.min(i + activeChunkSize, batchToSend.length);
+        const currentCountDisplay = currentSenderCurrentSent + batchProcessedCount + chunk.length;
 
-        setProgressStatus(`[${activeEmail}] Dispatching chunk ${startNum}-${endNum} of ${batchToSend.length} (${mode})...`);
+        setProgressStatus(`[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching chunk ${i + 1}-${i + chunk.length}...`);
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -439,7 +508,7 @@ export default function Home() {
             roundsDone,
             currentProcessed + batchProcessedCount,
             currentSuccess + batchSuccessCount,
-            bSize,
+            targetLotSize,
             mode,
             nextSender.email,
             nextSender.appPassword,
@@ -449,6 +518,7 @@ export default function Home() {
         }
 
         if (res.status === 403) {
+          localStorage.removeItem(SESSION_TOKEN_KEY);
           setIsSuspended(true);
           setLoading(false);
           return;
@@ -486,7 +556,9 @@ export default function Home() {
       }
 
       if (!isStopRequestedRef.current && !fallbackTriggered) {
-        markSenderUsed(activeEmail);
+        // 🎯 1. इस सेंडर का टोटल काउंट अपडेट करें
+        const updatedSenderSent = currentSenderCurrentSent + batchProcessedCount;
+        senderSentCountRef.current[activeEmail.toLowerCase()] = updatedSenderSent;
 
         const remainingQueue = currentQueue.slice(batchToSend.length);
         const updatedTotalProcessed = currentProcessed + batchProcessedCount;
@@ -504,91 +576,92 @@ export default function Home() {
           localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
         }
 
-        if (batchToSend.length > 0) {
-          setLastBatchMessage(`✅ Processed via ${activeEmail}`);
+        setLastBatchMessage(`✅ Processed via ${activeEmail} (${updatedSenderSent}/${targetLotSize})`);
+
+        // 🎯 2. चेक करें कि क्या इस सेंडर का पूरा लॉट साइज खत्म हुआ?
+        let activePool = sendersList;
+        let nextIdx = senderIdx;
+        let senderJustCompletedLot = false;
+
+        if (updatedSenderSent >= targetLotSize) {
+          senderJustCompletedLot = true;
+          markSenderLotCompleted(activeEmail); // 24-घंटे का ताला
+          completedSendersCountRef.current += 1; // पूरा लॉट खत्म करने वाले सेंडर्स की गिनती
+          activePool = sendersList.filter(s => s.email.toLowerCase() !== activeEmail.toLowerCase());
+          setInMemorySenders(activePool);
+        } else {
+          nextIdx = (senderIdx + 1) % activePool.length;
         }
 
-        // Senders Rotation
-        let nextSender = sendersList[0];
-        let nextSenderIdx = 0;
-        if (sendersList.length > 1) {
-          nextSenderIdx = (senderIdx + 1) % sendersList.length;
-          nextSender = sendersList[nextSenderIdx];
-          setCurrentSenderIndex(nextSenderIdx);
-          setSenderEmail(nextSender.email);
-          setAppPassword(nextSender.appPassword);
-          setSenderName(nextSender.senderName);
-        }
-
-        // Check if finished
-        if (remainingQueue.length === 0) {
-          try {
-            await fetch("/api/smtp-vault", {
-              method: "PATCH",
-              headers: { 
-                "Content-Type": "application/json",
-                "x-session-token": latestSessionToken 
-              },
-              body: JSON.stringify({
-                machineId,
-                sessionToken: latestSessionToken,
-                updateType: "BULK_UPDATE_TIMESTAMP",
-                updateData: { emails: sendersList.map(s => s.email) }
-              })
-            });
-          } catch (e) {
-            console.error(e);
-          }
-          setIsCampaignStarted(false);
-          setLoading(false);
-          setProgressStatus("");
-          setRawSheetData("");
-          alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
+        // अगर कोई सेंडर नहीं बचा या पूरी लीड्स खत्म हो गईं
+        if (activePool.length === 0 || remainingQueue.length === 0) {
+          await consumeQueueBatch(
+            remainingQueue,
+            [],
+            0,
+            updatedRounds,
+            updatedTotalProcessed,
+            updatedTotalSuccess,
+            targetLotSize,
+            mode,
+            "",
+            "",
+            ""
+          );
           return;
         }
 
-        // Check Manual Pause Options
+        // 🎯 3. अगला सेंडर तैयार करें
+        const nextSender = activePool[nextIdx % activePool.length];
+        setCurrentSenderIndex(nextIdx % activePool.length);
+        setSenderEmail(nextSender.email);
+        setAppPassword(nextSender.appPassword);
+        setSenderName(nextSender.senderName);
+
+        // 🎯 4. पॉज कंडीशंस (Pause Controls):
         let shouldPause = false;
-        if (rotationModeRef.current === "EVERY_SINGLE_SENDER") shouldPause = true;
-        else if (rotationModeRef.current === "EVERY_N_SENDERS") {
-          const n = Math.max(1, pauseAfterNSendersRef.current);
-          if (updatedRounds > 0 && updatedRounds % n === 0) shouldPause = true;
+        let pauseMessage = "";
+
+        // बटन 3: अगर सेंडर ने अपना पूरा लॉट मार लिया तो पॉज हो
+        if (rotationModeRef.current === "EVERY_SINGLE_SENDER" && senderJustCompletedLot) {
+          shouldPause = true;
+          pauseMessage = `⏸️ [Single Sender Lot Finished]\nSender [${activeEmail}] completed full lot of ${targetLotSize} emails.\nClick Resume to start next sender [${nextSender.email}].`;
+        }
+
+        // बटन 2: जब चुने गए N सेंडर्स (जैसे 20 सेंडर्स) का पूरा लॉट खत्म हो जाए तब पॉज हो
+        if (rotationModeRef.current === "EVERY_N_SENDERS" && senderJustCompletedLot) {
+          const targetN = Math.max(1, pauseAfterNSendersRef.current);
+          if (completedSendersCountRef.current > 0 && completedSendersCountRef.current % targetN === 0) {
+            shouldPause = true;
+            pauseMessage = `⏸️ [Batch of ${targetN} Senders Completed]\nAll ${targetN} chosen senders have finished their complete lot size (${targetLotSize} emails each) via 1-by-1 Round-Robin.\nModify your content and click Resume to continue!`;
+          }
         }
 
         if (shouldPause) {
           setLoading(false);
           setProgressStatus("");
-          alert(
-            `⏸️ [Rotation Pause Triggered]\n` +
-            `Sender [${activeEmail}] completed turn #${updatedRounds}.\n` +
-            `You can now modify your Subject or Template below and click Resume!`
-          );
+          alert(pauseMessage);
           return;
         }
 
-        // 🔄 CONTINUOUS (NON-STOP) AUTO-DISPATCH
-        if (rotationModeRef.current === "CONTINUOUS" && remainingQueue.length > 0 && !isStopRequestedRef.current) {
-          const nextBatchSize = batchSize > 0 ? Math.min(batchSize, currentMaxLot) : DEFAULT_BATCH_SIZE;
-          setTimeout(() => {
-            if (!isStopRequestedRef.current) {
-              consumeQueueBatch(
-                remainingQueue,
-                sendersList,
-                nextSenderIdx,
-                updatedRounds,
-                updatedTotalProcessed,
-                updatedTotalSuccess,
-                nextBatchSize,
-                mode,
-                nextSender.email,
-                nextSender.appPassword,
-                nextSender.senderName
-              );
-            }
-          }, 800);
-        } else {
-          setLoading(false);
-        }
+        // 🎯 5. लगातार ऑटो-डिस्पैच (CONTINUOUS / RUNNING ROUND-ROBIN)
+        setTimeout(() => {
+          if (!isStopRequestedRef.current) {
+            consumeQueueBatch(
+              remainingQueue,
+              activePool,
+              nextIdx % activePool.length,
+              updatedRounds,
+              updatedTotalProcessed,
+              updatedTotalSuccess,
+              targetLotSize,
+              mode,
+              nextSender.email,
+              nextSender.appPassword,
+              nextSender.senderName
+            );
+          }
+        }, 600);
       }
     } catch {
       alert("Network error. Please check your connection.");
@@ -597,7 +670,6 @@ export default function Home() {
     }
   };
 
-  // ▶ RESUME / NEXT BATCH (जहाँ रुके थे वहीं से अपडेटेड टेम्पलेट/सब्जेक्ट के साथ आगे चालू करेगा)
   const handleResumeOrNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading || pendingEmails.length === 0) return;
@@ -615,18 +687,18 @@ export default function Home() {
       setInMemorySenders(activeSenders);
     }
 
-    const currentSender = activeSenders[currentSenderIndex] || activeSenders[0];
+    const currentSender = activeSenders[currentSenderIndex % activeSenders.length] || activeSenders[0];
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    const safeBatchSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+    const targetLotSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
 
     consumeQueueBatch(
       pendingEmails,
       activeSenders,
-      currentSenderIndex,
+      currentSenderIndex % activeSenders.length,
       sendersUsedRounds,
       processedCount,
       successCount,
-      safeBatchSize,
+      targetLotSize,
       accountAgeMode,
       currentSender.email,
       currentSender.appPassword,
@@ -658,6 +730,9 @@ export default function Home() {
       setBatchSize(DEFAULT_BATCH_SIZE);
       setProgressStatus("");
       setLastBatchMessage("");
+      senderSentCountRef.current = {};
+      senderProcessedTimesRef.current = {};
+      completedSendersCountRef.current = 0;
       localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
     }
   };
@@ -686,8 +761,10 @@ export default function Home() {
 
   const remainingCount = pendingEmails.length;
   const currentMaxLot = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-  const isContinuous = rotationMode === "CONTINUOUS";
-  const currentBatchTarget = isContinuous ? 1 : Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount);
+  const isSingleSender = rotationMode === "EVERY_SINGLE_SENDER";
+  const currentBatchTarget = isSingleSender 
+    ? Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount) 
+    : 1;
 
   const totalAccountsCount = inMemorySenders.length;
   const remainingAccountsInQueue = totalAccountsCount > 0 
@@ -958,7 +1035,7 @@ export default function Home() {
                   </div>
 
                   <div>
-                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Batch Size per Turn</label>
+                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Lot Size per Account</label>
                     <input
                       type="number"
                       min={MIN_ALLOWED_BATCH_SIZE}
@@ -974,7 +1051,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Rotation Control Panel */}
+                {/* 🔄 3-Mode Rotation Control Panel */}
                 <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
                   <label className="text-[11px] font-bold text-indigo-300 block">
                     🔄 Rotation & Dispatching Settings:
@@ -982,25 +1059,25 @@ export default function Home() {
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                     <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "CONTINUOUS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
                       <input type="radio" name="rotationModeOption" checked={rotationMode === "CONTINUOUS"} onChange={() => setRotationMode("CONTINUOUS")} />
-                      <span>Continuous (1-by-1 Non-Stop)</span>
+                      <span>1. Continuous (Non-Stop RR)</span>
                     </label>
                     
                     <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_N_SENDERS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
                       <input type="radio" name="rotationModeOption" checked={rotationMode === "EVERY_N_SENDERS"} onChange={() => setRotationMode("EVERY_N_SENDERS")} />
-                      <span>Pause after N Senders</span>
+                      <span>2. Pause after N Senders (RR)</span>
                     </label>
 
                     <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_SINGLE_SENDER" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
                       <input type="radio" name="rotationModeOption" checked={rotationMode === "EVERY_SINGLE_SENDER"} onChange={() => setRotationMode("EVERY_SINGLE_SENDER")} />
-                      <span>Pause Every Sender Turn</span>
+                      <span>3. Pause Every Sender (Full Lot)</span>
                     </label>
                   </div>
 
                   {rotationMode === "EVERY_N_SENDERS" && (
                     <div className="pt-2 flex items-center gap-3">
-                      <span className="text-[11px] text-slate-300">Pause after how many senders?</span>
+                      <span className="text-[11px] text-slate-300">Pause after how many senders complete full lot?</span>
                       <input 
-                        type="number" min={1} max={20} 
+                        type="number" min={1} max={50} 
                         value={pauseAfterNSenders}
                         onChange={(e) => setPauseAfterNSenders(parseInt(e.target.value) || 1)}
                         className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center"
@@ -1166,7 +1243,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* 📝 Live Editable Subject, Template & Signature during Campaign / Pause */}
+                {/* 📝 Live Editable Subject, Template & Signature */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
                   <div>
                     <label className="text-[10px] text-slate-300 block mb-1 font-bold">
@@ -1219,7 +1296,7 @@ export default function Home() {
                     type="submit"
                     className="w-full py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-black rounded-xl text-xs sm:text-sm transition-all duration-300 shadow-xl flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
                   >
-                    <span>▶️ Resume Campaign (Dispatch {currentBatchTarget} Leads via [{senderEmail}])</span>
+                    <span>▶️ Resume Campaign (Dispatch {currentBatchTarget} Lead(s) via [{senderEmail}])</span>
                   </button>
                 )}
               </form>
