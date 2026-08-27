@@ -144,9 +144,9 @@ export async function POST(req: Request) {
         break;
       }
 
-      const randomGreeting = pickRandom(GREETINGS || ["Hi,", "Hello,"]);
-      const randomOpener = pickRandom(OPENERS || ["Hope this note finds you well."]);
-      const randomSignOff = pickRandom(SIGN_OFFS || ["Best regards,", "Thanks,"]);
+      const randomGreeting = pickRandom(GREETINGS);
+      const randomOpener = pickRandom(OPENERS);
+      const randomSignOff = pickRandom(SIGN_OFFS);
 
       // 💡 100% असली ह्यूमन प्लेन-टेक्स्ट स्ट्रक्चर
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n\n${finalSignoffName}`;
