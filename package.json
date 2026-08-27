@@ -9,6 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "imap-simple": "^5.1.0",
+    "imapflow": "^1.7.6",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^1.33.0",
     "mongoose": "^9.9.3",
@@ -19,6 +21,8 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/imap-simple": "^4.2.10",
+    "@types/imapflow": "^1.0.23",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20",
     "@types/nodemailer": "^8.0.1",

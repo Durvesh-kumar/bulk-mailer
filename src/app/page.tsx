@@ -3,62 +3,43 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
-import { getClientMachineId } from "@/lib/fingerprint";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import ReferralBanner from "@/components/ReferralBanner";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 import RejectedLeadsModal from "@/components/modals/RejectedLeadsModal";
 import SpintaxPreviewModal from "@/components/modals/SpintaxPreviewModal";
 import { cleanAndFilterLeads, RejectedEmailItem } from "@/lib/leadCleaner";
+import { useLicenseGuard } from "@/hook/useLicenseGuard";
+import { isSenderInCooldown, markSenderLotCompleted } from "@/utils/cooldown";
+import { InputField } from "@/components/ui/InputField";
+import {
+  ProfileTier,
+  SmtpAccount,
+  FailedEmailItem,
+  TIER_META,
+  SESSION_TOKEN_KEY,
+  PENDING_QUEUE_STORAGE_KEY,
+} from "@/types/vault";
 
-export type ProfileTier = "CURRENT" | "YEAR_1" | "YEAR_2" | "YEAR_4" | "YEAR_6";
-
-const SESSION_TOKEN_KEY = "reachout_daily_session_token";
-const PENDING_QUEUE_STORAGE_KEY = "inboxsend_pending_queue_state";
-const SENDERS_COOLDOWN_STORAGE_KEY = "inboxsend_senders_cooldown_state";
 const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
-const COOLDOWN_DURATION_MS = 24 * 60 * 60 * 1000; // 24 Hours Cooldown
 
-interface SmtpAccount {
-  _id: string;
-  email: string;
-  appPassword: string;
-  senderName: string;
-  profileTier: ProfileTier;
-}
-
-interface FailedEmailItem {
-  email: string;
-  reason: string;
-  senderUsed: string;
-  time: string;
-}
-
-const TIER_META: Record<ProfileTier, { label: string; badge: string; modeMap: AccountAgeMode; color: string }> = {
-  CURRENT: { label: "Fresh (<6 Mo)", badge: "🔴 Fresh", modeMap: "FRESH", color: "border-rose-500 text-rose-300 bg-rose-950/30" },
-  YEAR_1: { label: "1 Year Aged", badge: "🟡 1 Year", modeMap: "STANDARD", color: "border-amber-500 text-amber-300 bg-amber-950/30" },
-  YEAR_2: { label: "2 Year Aged", badge: "🟢 2 Year", modeMap: "AGED", color: "border-emerald-500 text-emerald-300 bg-emerald-950/30" },
-  YEAR_4: { label: "4 Year Prime", badge: "💎 4 Year", modeMap: "AGED", color: "border-blue-500 text-blue-300 bg-blue-950/30" },
-  YEAR_6: { label: "6+ Year Ultra", badge: "👑 6+ Year", modeMap: "AGED", color: "border-purple-500 text-purple-300 bg-purple-950/30" },
+// ⏳ फ्रंटएंड रैंडम डिले हेल्पर (3.0s से 4.5s)
+const sleepRandomDelay = (min = 3000, max = 4500) => {
+  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
+  return new Promise((resolve) => setTimeout(resolve, ms));
 };
 
 export default function Home() {
-  const [loadingLicense, setLoadingLicense] = useState(true);
-  const [isSuspended, setIsSuspended] = useState(false);
-  const [userType, setUserType] = useState<"NEW_USER" | "SUSPENDED" | "EXPIRED">("NEW_USER");
-  const [expiryDate, setExpiryDate] = useState("");
-  const [machineId, setMachineId] = useState("");
-  const [appDomain, setAppDomain] = useState("");
+  const { loadingLicense, isSuspended, userType, expiryDate, machineId, appDomain, setIsSuspended } = useLicenseGuard();
 
   const [selectedTier, setSelectedTier] = useState<ProfileTier>("YEAR_2");
   const [isVaultLoaded, setIsVaultLoaded] = useState(false);
 
-  // Active Sender State
+  // Active Sender State (Password बैकग्राउंड में रहेगा, UI में नहीं दिखेगा)
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
 
   const [inMemorySenders, setInMemorySenders] = useState<SmtpAccount[]>([]);
   const [currentSenderIndex, setCurrentSenderIndex] = useState<number>(0);
@@ -84,7 +65,6 @@ export default function Home() {
   const rotationModeRef = useRef<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
   const pauseAfterNSendersRef = useRef<number>(2);
 
-  // 🎯 Trackers: प्रति सेंडर भेजे गए मेल + टाइमस्टैम्प + ग्रुप एग्जॉस्ट काउंट
   const senderSentCountRef = useRef<Record<string, number>>({});
   const senderProcessedTimesRef = useRef<Record<string, string>>({});
   const completedSendersCountRef = useRef<number>(0);
@@ -99,7 +79,7 @@ export default function Home() {
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
   const [successCount, setSuccessCount] = useState<number>(0);
-  
+
   const [loading, setLoading] = useState(false);
   const [progressStatus, setProgressStatus] = useState<string>("");
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
@@ -112,111 +92,12 @@ export default function Home() {
   const [failedLeadsList, setFailedLeadsList] = useState<FailedEmailItem[]>([]);
   const [showFailedModal, setShowFailedModal] = useState(false);
   const [copiedType, setCopiedType] = useState<"DETAILED" | "EMAILS" | null>(null);
-
   const [showPreviewModal, setShowPreviewModal] = useState(false);
-
-  // 🛡️ REFRESH & REAL-TIME HARDWARE / LICENSE VERIFICATION
-  useEffect(() => {
-    async function initSecurityAndLicense() {
-      try {
-        const currentDomain = window.location.hostname;
-        setAppDomain(currentDomain);
-        
-        const currentMachineId = await getClientMachineId();
-        setMachineId(currentMachineId);
-
-        const existingSessionToken = localStorage.getItem(SESSION_TOKEN_KEY);
-
-        const res = await fetch("/api/check-license", {
-          method: "POST",
-          headers: { 
-            "Content-Type": "application/json",
-            "Cache-Control": "no-cache"
-          },
-          body: JSON.stringify({ 
-            machineId: currentMachineId, 
-            domain: currentDomain,
-            sessionToken: existingSessionToken,
-          }),
-        });
-
-        const data = await res.json();
-
-        if (!res.ok || !data.allowed) {
-          if (data.clearSession) {
-            localStorage.removeItem(SESSION_TOKEN_KEY);
-          }
-          setIsSuspended(true);
-          setUserType(data.reason === "EXPIRED" ? "EXPIRED" : data.reason === "SUSPENDED" ? "SUSPENDED" : "NEW_USER");
-          if (data.expiryDate) setExpiryDate(data.expiryDate);
-        } else {
-          setIsSuspended(false);
-          if (data.sessionToken) {
-            localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
-          }
-
-          try {
-            const savedQueue = localStorage.getItem(PENDING_QUEUE_STORAGE_KEY);
-            if (savedQueue) {
-              const parsed = JSON.parse(savedQueue);
-              if (Array.isArray(parsed) && parsed.length > 0) {
-                setPendingEmails(parsed);
-                setRawSheetData(parsed.join("\n"));
-                setInitialTotalCount(parsed.length);
-                setIsCampaignStarted(true);
-                setLastBatchMessage(`⚡ Restored ${parsed.length} pending leads from last active session`);
-              }
-            }
-          } catch (e) {
-            console.error("Queue restore error:", e);
-          }
-        }
-      } catch (err) {
-        console.error("License check failed:", err);
-        localStorage.removeItem(SESSION_TOKEN_KEY);
-        setIsSuspended(true);
-        setUserType("NEW_USER");
-      } finally {
-        setLoadingLicense(false);
-      }
-    }
-
-    initSecurityAndLicense();
-  }, []);
-
-  // 🛡️ 24-घंटे का कूलडाउन चेक
-  const isSenderInCooldown = (email: string): boolean => {
-    try {
-      const cooldownMap = JSON.parse(localStorage.getItem(SENDERS_COOLDOWN_STORAGE_KEY) || "{}");
-      const lastUsedTime = cooldownMap[email.toLowerCase()];
-      if (!lastUsedTime) return false;
-      const elapsed = Date.now() - lastUsedTime;
-      return elapsed < COOLDOWN_DURATION_MS;
-    } catch {
-      return false;
-    }
-  };
-
-  // 🛡️ पूरा लॉट खत्म होने पर सेंडर पर 24 घंटे का ताला लगाना
-  const markSenderLotCompleted = (email: string) => {
-    try {
-      const nowMs = Date.now();
-      const isoTime = new Date(nowMs).toISOString();
-
-      senderProcessedTimesRef.current[email.toLowerCase()] = isoTime;
-
-      const cooldownMap = JSON.parse(localStorage.getItem(SENDERS_COOLDOWN_STORAGE_KEY) || "{}");
-      cooldownMap[email.toLowerCase()] = nowMs;
-      localStorage.setItem(SENDERS_COOLDOWN_STORAGE_KEY, JSON.stringify(cooldownMap));
-    } catch (e) {
-      console.error("Cooldown save error:", e);
-    }
-  };
 
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
     setLoading(true);
-    setProgressStatus(`Loading ${TIER_META[tier].label} accounts...`);
+    setProgressStatus(`Loading ${TIER_META[tier]?.label || tier} accounts...`);
     const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
     try {
@@ -228,7 +109,7 @@ export default function Home() {
       const data = await res.json();
       if (data.accounts && data.accounts.length > 0) {
         const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
-        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email));
+        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email, acc.lastSentAt));
 
         if (availableAccounts.length > 0) {
           setInMemorySenders(availableAccounts);
@@ -236,16 +117,18 @@ export default function Home() {
           setSendersUsedRounds(0);
           setSenderEmail(availableAccounts[0].email);
           setAppPassword(availableAccounts[0].appPassword);
-          setSenderName(availableAccounts[0].senderName);
+          setSenderName(availableAccounts[0].senderName || "Colleague");
           setSelectedTier(tier);
-          setAccountAgeMode(TIER_META[tier].modeMap);
+          if (TIER_META[tier]?.modeMap) {
+            setAccountAgeMode(TIER_META[tier].modeMap);
+          }
           setIsVaultLoaded(true);
           setLastBatchMessage(`⚡ Loaded ${availableAccounts.length} active account(s) (${currentTierOnly.length - availableAccounts.length} in 24h cooldown skipped)`);
         } else {
-          alert(`⚠️ All accounts in ${TIER_META[tier].label} are currently under 24-hour cooldown protection!`);
+          alert(`⚠️ All accounts in ${TIER_META[tier]?.label || tier} are currently under 24-hour cooldown protection!`);
         }
       } else {
-        alert(`No accounts registered under ${TIER_META[tier].label} in your Vault.`);
+        alert(`No accounts registered under ${TIER_META[tier]?.label || tier} in your Vault.`);
       }
     } catch {
       alert("Failed to load vault accounts.");
@@ -325,8 +208,8 @@ export default function Home() {
       return;
     }
 
-    if (!senderEmail || !appPassword || !senderName) {
-      alert("Sender credentials missing! Please select an Age Profile or enter details.");
+    if (!senderEmail || !senderName) {
+      alert("Sender details missing! Please select an Age Profile from Vault.");
       return;
     }
 
@@ -347,7 +230,6 @@ export default function Home() {
 
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
 
-    // Reset trackers
     senderSentCountRef.current = {};
     senderProcessedTimesRef.current = {};
     completedSendersCountRef.current = 0;
@@ -378,7 +260,6 @@ export default function Home() {
     );
   };
 
-  // 🎯 मुख्य यूनिवर्सल डिस्पैचर
   const consumeQueueBatch = async (
     currentQueue: string[],
     sendersList: SmtpAccount[],
@@ -395,8 +276,7 @@ export default function Home() {
     if (isStopRequestedRef.current || currentQueue.length === 0 || sendersList.length === 0) {
       setLoading(false);
       setProgressStatus("");
-      
-      // DB में सभी का सटीक टाइम सिंक करें
+
       if (currentQueue.length === 0 || sendersList.length === 0) {
         let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
         try {
@@ -405,10 +285,7 @@ export default function Home() {
             const recordsPayload = recordedEntries.map(([email, sentAt]) => ({ email, sentAt }));
             await fetch("/api/smtp-vault", {
               method: "PATCH",
-              headers: { 
-                "Content-Type": "application/json",
-                "x-session-token": latestSessionToken 
-              },
+              headers: { "Content-Type": "application/json", "x-session-token": latestSessionToken },
               body: JSON.stringify({
                 machineId,
                 sessionToken: latestSessionToken,
@@ -436,20 +313,20 @@ export default function Home() {
     setLoading(true);
     setLastBatchMessage("");
     let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-    
-    // 🎯 मोड चयन:
-    // Button 3 (EVERY_SINGLE_SENDER): एक सेंडर से उसका पूरा बचा हुआ लॉट एक साथ चंक्स में
-    // Button 1 (CONTINUOUS) & Button 2 (EVERY_N_SENDERS): 1-बाय-1 सच्चा राउंड-रॉबिन
+
     const isSingleSenderFullLot = rotationModeRef.current === "EVERY_SINGLE_SENDER";
     const currentSenderCurrentSent = senderSentCountRef.current[activeEmail.toLowerCase()] || 0;
     const remainingLotForThisSender = Math.max(1, targetLotSize - currentSenderCurrentSent);
 
+    // 🎯 Round-Robin (CONTINUOUS & EVERY_N) = 1 Email Batch | Single Sender = Full Remaining Chunks
     const actualBatchLimit = isSingleSenderFullLot 
       ? Math.min(remainingLotForThisSender, currentQueue.length)
       : 1;
 
     const batchToSend = currentQueue.slice(0, actualBatchLimit);
-    const activeChunkSize = MODE_CONFIGS[mode]?.chunkSize || 8;
+    const activeChunkSize = isSingleSenderFullLot 
+      ? (MODE_CONFIGS[mode]?.chunkSize || 8) 
+      : 1;
 
     let batchProcessedCount = 0;
     let batchSuccessCount = 0;
@@ -462,7 +339,7 @@ export default function Home() {
         const chunk = batchToSend.slice(i, i + activeChunkSize);
         const currentCountDisplay = currentSenderCurrentSent + batchProcessedCount + chunk.length;
 
-        setProgressStatus(`[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching chunk ${i + 1}-${i + chunk.length}...`);
+        setProgressStatus(`[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching ${chunk.length} email(s)...`);
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -498,7 +375,7 @@ export default function Home() {
           setInMemorySenders(remainingSenders);
           setSenderEmail(nextSender.email);
           setAppPassword(nextSender.appPassword);
-          setSenderName(nextSender.senderName);
+          setSenderName(nextSender.senderName || "Colleague");
 
           const unhandledQueue = currentQueue.slice(batchProcessedCount);
           await consumeQueueBatch(
@@ -512,7 +389,7 @@ export default function Home() {
             mode,
             nextSender.email,
             nextSender.appPassword,
-            nextSender.senderName
+            nextSender.senderName || "Colleague"
           );
           return;
         }
@@ -556,9 +433,9 @@ export default function Home() {
       }
 
       if (!isStopRequestedRef.current && !fallbackTriggered) {
-        // 🎯 1. इस सेंडर का टोटल काउंट अपडेट करें
         const updatedSenderSent = currentSenderCurrentSent + batchProcessedCount;
         senderSentCountRef.current[activeEmail.toLowerCase()] = updatedSenderSent;
+        senderProcessedTimesRef.current[activeEmail.toLowerCase()] = new Date().toISOString();
 
         const remainingQueue = currentQueue.slice(batchToSend.length);
         const updatedTotalProcessed = currentProcessed + batchProcessedCount;
@@ -578,22 +455,21 @@ export default function Home() {
 
         setLastBatchMessage(`✅ Processed via ${activeEmail} (${updatedSenderSent}/${targetLotSize})`);
 
-        // 🎯 2. चेक करें कि क्या इस सेंडर का पूरा लॉट साइज खत्म हुआ?
         let activePool = sendersList;
         let nextIdx = senderIdx;
         let senderJustCompletedLot = false;
 
+        // लॉट साइज पूरा होने पर सेंडर को पूल से बाहर निकालना (24h Cooldown)
         if (updatedSenderSent >= targetLotSize) {
           senderJustCompletedLot = true;
-          markSenderLotCompleted(activeEmail); // 24-घंटे का ताला
-          completedSendersCountRef.current += 1; // पूरा लॉट खत्म करने वाले सेंडर्स की गिनती
+          markSenderLotCompleted(activeEmail);
+          completedSendersCountRef.current += 1;
           activePool = sendersList.filter(s => s.email.toLowerCase() !== activeEmail.toLowerCase());
           setInMemorySenders(activePool);
         } else {
           nextIdx = (senderIdx + 1) % activePool.length;
         }
 
-        // अगर कोई सेंडर नहीं बचा या पूरी लीड्स खत्म हो गईं
         if (activePool.length === 0 || remainingQueue.length === 0) {
           await consumeQueueBatch(
             remainingQueue,
@@ -611,29 +487,25 @@ export default function Home() {
           return;
         }
 
-        // 🎯 3. अगला सेंडर तैयार करें
         const nextSender = activePool[nextIdx % activePool.length];
         setCurrentSenderIndex(nextIdx % activePool.length);
         setSenderEmail(nextSender.email);
         setAppPassword(nextSender.appPassword);
-        setSenderName(nextSender.senderName);
+        setSenderName(nextSender.senderName || "Colleague");
 
-        // 🎯 4. पॉज कंडीशंस (Pause Controls):
         let shouldPause = false;
         let pauseMessage = "";
 
-        // बटन 3: अगर सेंडर ने अपना पूरा लॉट मार लिया तो पॉज हो
         if (rotationModeRef.current === "EVERY_SINGLE_SENDER" && senderJustCompletedLot) {
           shouldPause = true;
           pauseMessage = `⏸️ [Single Sender Lot Finished]\nSender [${activeEmail}] completed full lot of ${targetLotSize} emails.\nClick Resume to start next sender [${nextSender.email}].`;
         }
 
-        // बटन 2: जब चुने गए N सेंडर्स (जैसे 20 सेंडर्स) का पूरा लॉट खत्म हो जाए तब पॉज हो
         if (rotationModeRef.current === "EVERY_N_SENDERS" && senderJustCompletedLot) {
           const targetN = Math.max(1, pauseAfterNSendersRef.current);
           if (completedSendersCountRef.current > 0 && completedSendersCountRef.current % targetN === 0) {
             shouldPause = true;
-            pauseMessage = `⏸️ [Batch of ${targetN} Senders Completed]\nAll ${targetN} chosen senders have finished their complete lot size (${targetLotSize} emails each) via 1-by-1 Round-Robin.\nModify your content and click Resume to continue!`;
+            pauseMessage = `⏸️ [Batch of ${targetN} Senders Completed]\nAll ${targetN} chosen senders finished their full lot (${targetLotSize} emails each) via 1-by-1 Round-Robin.\nModify your content and click Resume to continue!`;
           }
         }
 
@@ -644,24 +516,28 @@ export default function Home() {
           return;
         }
 
-        // 🎯 5. लगातार ऑटो-डिस्पैच (CONTINUOUS / RUNNING ROUND-ROBIN)
-        setTimeout(() => {
-          if (!isStopRequestedRef.current) {
-            consumeQueueBatch(
-              remainingQueue,
-              activePool,
-              nextIdx % activePool.length,
-              updatedRounds,
-              updatedTotalProcessed,
-              updatedTotalSuccess,
-              targetLotSize,
-              mode,
-              nextSender.email,
-              nextSender.appPassword,
-              nextSender.senderName
-            );
-          }
-        }, 600);
+        // ⏱️ केवल Round-Robin (CONTINUOUS / EVERY_N) में 3s से 4.5s का फ्रंटएंड डिले
+        if (rotationModeRef.current === "CONTINUOUS" || rotationModeRef.current === "EVERY_N_SENDERS") {
+          await sleepRandomDelay(3000, 4500);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+
+        if (!isStopRequestedRef.current) {
+          consumeQueueBatch(
+            remainingQueue,
+            activePool,
+            nextIdx % activePool.length,
+            updatedRounds,
+            updatedTotalProcessed,
+            updatedTotalSuccess,
+            targetLotSize,
+            mode,
+            nextSender.email,
+            nextSender.appPassword,
+            nextSender.senderName || "Colleague"
+          );
+        }
       }
     } catch {
       alert("Network error. Please check your connection.");
@@ -702,7 +578,7 @@ export default function Home() {
       accountAgeMode,
       currentSender.email,
       currentSender.appPassword,
-      currentSender.senderName
+      currentSender.senderName || "Colleague"
     );
   };
 
@@ -752,7 +628,7 @@ export default function Home() {
         machineId={machineId}
         appDomain={appDomain}
         userType={userType}
-        expiryDate={expiryDate}
+        expiryDate={expiryDate ?? undefined}
         adminPhone="+918266821377"
         adminEmail="inboxsend.support@gmail.com"
       />
@@ -774,9 +650,8 @@ export default function Home() {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 py-5 px-3 sm:px-6 font-sans selection:bg-indigo-500 selection:text-white">
       <div className="max-w-7xl mx-auto space-y-4">
-
         <ReferralBanner />
-        
+
         {/* Header Bar */}
         <div className="bg-slate-900/90 border border-slate-800 px-5 py-3 rounded-2xl flex flex-wrap justify-between items-center gap-3 shadow-xl">
           <div className="flex items-center gap-3">
@@ -809,7 +684,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* 🎯 8 STATS CARDS GRID */}
+        {/* Stats Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 bg-slate-900/90 border border-slate-800 p-3 rounded-2xl shadow-lg">
           <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
             <span className="text-[9px] text-slate-400 uppercase font-black block">Senders Loaded</span>
@@ -883,9 +758,7 @@ export default function Home() {
 
         {!isCampaignStarted ? (
           <form onSubmit={handleStartCampaign} className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-            
             <div className="lg:col-span-5 flex flex-col justify-between gap-3">
-              
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg">
                 <div className="flex justify-between items-center">
                   <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
@@ -921,55 +794,29 @@ export default function Home() {
                 </div>
               </div>
 
+              {/* Sender Details (Clean UI Without Password Box) */}
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2.5 shadow-lg">
-                <div>
-                  <label className="text-[11px] font-bold text-slate-300 block mb-1">Active Sender Gmail</label>
-                  <input
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <InputField
+                    label="Active Sender Gmail"
                     type="email"
                     required
                     disabled={loading}
                     value={senderEmail}
                     onChange={(e) => setSenderEmail(e.target.value)}
                     placeholder="account1@gmail.com"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500 font-mono"
+                    className="font-mono"
                   />
-                </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <div className="flex justify-between items-center mb-1">
-                      <label className="text-[11px] font-bold text-slate-300">App Password</label>
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="text-[9px] text-slate-400 hover:text-white cursor-pointer"
-                      >
-                        {showPassword ? "🙈 Hide" : "👁️ Show"}
-                      </button>
-                    </div>
-                    <input
-                      type={showPassword ? "text" : "password"}
-                      required
-                      disabled={loading}
-                      value={appPassword}
-                      onChange={(e) => setAppPassword(e.target.value)}
-                      placeholder="xxxx xxxx xxxx xxxx"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Display Name</label>
-                    <input
-                      type="text"
-                      required
-                      disabled={loading}
-                      value={senderName}
-                      onChange={(e) => setSenderName(e.target.value)}
-                      placeholder="e.g. Sales Lead"
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                  </div>
+                  <InputField
+                    label="Display Name"
+                    type="text"
+                    required
+                    disabled={loading}
+                    value={senderName}
+                    onChange={(e) => setSenderName(e.target.value)}
+                    placeholder="e.g. Sales Lead"
+                  />
                 </div>
               </div>
 
@@ -1008,11 +855,9 @@ export default function Home() {
                   className="w-full flex-1 min-h-[300px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
                 />
               </div>
-
             </div>
 
             <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col justify-between">
-              
               <div className="space-y-3">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
@@ -1051,7 +896,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* 🔄 3-Mode Rotation Control Panel */}
+                {/* Rotation Settings */}
                 <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
                   <label className="text-[11px] font-bold text-indigo-300 block">
                     🔄 Rotation & Dispatching Settings:
@@ -1086,18 +931,15 @@ export default function Home() {
                   )}
                 </div>
 
-                <div>
-                  <label className="text-[11px] font-bold text-slate-300 block mb-1">Subject Line</label>
-                  <input
-                    type="text"
-                    required
-                    disabled={loading}
-                    value={subject}
-                    onChange={(e) => setSubject(e.target.value)}
-                    placeholder="e.g. Quick question regarding partnership"
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 outline-none"
-                  />
-                </div>
+                <InputField
+                  label="Subject Line"
+                  type="text"
+                  required
+                  disabled={loading}
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="e.g. Quick question regarding partnership"
+                />
 
                 <div className="space-y-1">
                   <div className="flex justify-between items-center">
@@ -1124,17 +966,15 @@ export default function Home() {
                   />
                 </div>
 
-                <div>
-                  <label className="text-[11px] font-bold text-emerald-400 block mb-1">Custom Signature & Signoff Details</label>
-                  <input
-                    type="text"
-                    disabled={loading}
-                    value={customSignoffName}
-                    onChange={(e) => setCustomSignoffName(e.target.value)}
-                    placeholder="e.g. John Doe | Founder at Acme Corp (Optional)"
-                    className="w-full bg-slate-950 border border-emerald-500/30 rounded-xl px-3 py-1.5 text-xs text-slate-100 focus:border-emerald-500 outline-none"
-                  />
-                </div>
+                <InputField
+                  label="Custom Signature & Signoff Details"
+                  type="text"
+                  disabled={loading}
+                  value={customSignoffName}
+                  onChange={(e) => setCustomSignoffName(e.target.value)}
+                  placeholder="e.g. John Doe | Founder at Acme Corp (Optional)"
+                  accentColor="emerald"
+                />
               </div>
 
               <button
@@ -1148,16 +988,13 @@ export default function Home() {
                     <span>Dispatching Running...</span>
                   </>
                 ) : (
-                  <>
-                    <span>🚀 Launch Campaign & Send (Automated Non-Stop)</span>
-                  </>
+                  <span>🚀 Launch Campaign & Send (Automated Non-Stop)</span>
                 )}
               </button>
             </div>
-
           </form>
         ) : (
-          /* STEP 2: IN-MEMORY ROTATION & LIVE EDIT DASHBOARD */
+          /* STEP 2: Live Rotation Dashboard */
           <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
             {remainingCount > 0 ? (
               <form onSubmit={handleResumeOrNextBatch} className="space-y-4 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
@@ -1196,77 +1033,45 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-[10px] text-slate-400 block mb-0.5">Active Sender Gmail</label>
-                    <input
-                      type="email"
-                      required
-                      disabled={loading}
-                      value={senderEmail}
-                      onChange={(e) => setSenderEmail(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white font-mono outline-none focus:border-indigo-500"
-                    />
-                  </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <InputField
+                    label="Active Sender Gmail"
+                    type="email"
+                    required
+                    disabled={loading}
+                    value={senderEmail}
+                    onChange={(e) => setSenderEmail(e.target.value)}
+                    className="font-mono bg-slate-900 border-slate-700"
+                  />
 
-                  <div>
-                    <div className="flex justify-between items-center mb-0.5">
-                      <label className="text-[10px] text-slate-400">App Password</label>
-                      <button
-                        type="button"
-                        onClick={() => setShowPassword(!showPassword)}
-                        className="text-[9px] text-slate-400 hover:text-white cursor-pointer"
-                      >
-                        {showPassword ? "🙈 Hide" : "👁️ Show"}
-                      </button>
-                    </div>
-                    <input
-                      type={showPassword ? "text" : "password"}
-                      required
-                      disabled={loading}
-                      value={appPassword}
-                      onChange={(e) => setAppPassword(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] text-slate-400 block mb-0.5">Sender Display Name</label>
-                    <input
-                      type="text"
-                      required
-                      disabled={loading}
-                      value={senderName}
-                      onChange={(e) => setSenderName(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                  </div>
+                  <InputField
+                    label="Sender Display Name"
+                    type="text"
+                    required
+                    disabled={loading}
+                    value={senderName}
+                    onChange={(e) => setSenderName(e.target.value)}
+                    className="bg-slate-900 border-slate-700"
+                  />
                 </div>
 
-                {/* 📝 Live Editable Subject, Template & Signature */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                  <div>
-                    <label className="text-[10px] text-slate-300 block mb-1 font-bold">
-                      ✏️ Live Subject Line (Updates instantly on next send)
-                    </label>
-                    <input
-                      type="text"
-                      value={subject}
-                      onChange={(e) => setSubject(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-slate-300 block mb-1 font-bold">
-                      ✏️ Live Sign-off / Signature
-                    </label>
-                    <input
-                      type="text"
-                      value={customSignoffName}
-                      onChange={(e) => setCustomSignoffName(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-emerald-500"
-                    />
-                  </div>
+                  <InputField
+                    label="✏️ Live Subject Line (Updates instantly on next send)"
+                    type="text"
+                    value={subject}
+                    onChange={(e) => setSubject(e.target.value)}
+                    className="bg-slate-900 border-slate-700"
+                  />
+
+                  <InputField
+                    label="✏️ Live Sign-off / Signature"
+                    type="text"
+                    value={customSignoffName}
+                    onChange={(e) => setCustomSignoffName(e.target.value)}
+                    accentColor="emerald"
+                    className="bg-slate-900 border-slate-700"
+                  />
                 </div>
 
                 <div className="w-full space-y-1">
@@ -1290,7 +1095,6 @@ export default function Home() {
                   />
                 </div>
 
-                {/* RESUME / NEXT DISPATCH BUTTON */}
                 {!loading && (
                   <button
                     type="submit"
@@ -1307,7 +1111,6 @@ export default function Home() {
             )}
           </div>
         )}
-
       </div>
 
       <RejectedLeadsModal
@@ -1317,7 +1120,6 @@ export default function Home() {
         stats={rejectedStats}
       />
 
-      {/* 🔴 FAILED LEADS MODAL */}
       {showFailedModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
           <div className="bg-slate-900 border border-rose-500/40 w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4">

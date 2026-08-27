@@ -3,7 +3,7 @@ import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
-import { decryptPassword } from "@/lib/encryption"; // 👈 लोकल AES-256 डिक्रिप्शन इम्पोर्ट
+import { decryptPassword } from "@/lib/encryption";
 
 const sleepRandom = (min: number, max: number): Promise<void> => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -17,6 +17,8 @@ const pickRandom = (arr: string[]): string => {
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
+  let transporter: nodemailer.Transporter | null = null;
+
   try {
     const body = await req.json();
     const {
@@ -71,13 +73,11 @@ export async function POST(req: Request) {
 
     const cleanSender = senderEmail.trim().toLowerCase();
 
-    // 🛡️ Smart Dual Password Handler:
-    // 1. अगर यूजर ने सीधे 16-अक्षर का ऐप पासवर्ड टाइप किया है -> सीधा इस्तेमाल करो
-    // 2. अगर वॉल्ट का एन्क्रिप्टेड सिफरटेक्स्ट आया है (iv:cipher) -> सर्वर मेमोरी में डिक्रिप्ट करो
+    // 🛡️ Smart Dual Password Handler (Direct 16-char or Encrypted Vault ciphertext)
     const rawPass = String(appPassword).trim();
     let cleanPassword = rawPass.replace(/\s+/g, "");
 
-    if (rawPass.includes(":") && rawPass.length > 32) {
+    if (rawPass.includes(":") && rawPass.length > 20) {
       try {
         cleanPassword = decryptPassword(rawPass).replace(/\s+/g, "");
       } catch (decErr) {
@@ -85,16 +85,16 @@ export async function POST(req: Request) {
       }
     }
 
-    const cleanHeaderName = senderName.trim();
+    const cleanHeaderName = (senderName || "Colleague").trim();
 
-    // 🔒 साइन-ऑफ नाम लॉजिक: अगर कस्टम नाम नहीं है या खाली है, तो सेंडर का नाम ही जाएगा
+    // 🔒 साइन-ऑफ नाम लॉजिक
     const finalSignoffName =
       customSignoffName && customSignoffName.trim().length > 0
         ? customSignoffName.trim()
         : cleanHeaderName;
 
-    // 🔒 SMTP Connection Pool (Max 3 Connections)
-    const transporter = nodemailer.createTransport({
+    // 🚀 NO POOL - Pure Direct Client Signature (100% Inbox Placement)
+    transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
       secure: true,
@@ -102,9 +102,6 @@ export async function POST(req: Request) {
         user: cleanSender,
         pass: cleanPassword,
       },
-      pool: true,
-      maxConnections: 3,
-      maxMessages: 100,
       name: "mail.google.com",
     });
 
@@ -130,7 +127,7 @@ export async function POST(req: Request) {
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
     let isQuotaHit = false;
 
-    // यूजर के टेम्पलेट से डुप्लिकेट ग्रीटिंग/ओपनर लाइन्स को सुरक्षित रूप से क्लीन करना
+    // टेम्पलेट क्लीनिंग
     const cleanUserBody = template
       .trim()
       .replace(/^(hi|hello|hey|greetings|dear)[^\n]*\n+/i, "")
@@ -143,16 +140,15 @@ export async function POST(req: Request) {
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
 
-      // अगर कोटा लिमिट हिट हो गई, तो बाकी बची लीड्स को वेस्ट किए बिना तुरंत ब्रेक करना
       if (isQuotaHit) {
         break;
       }
 
-      const randomGreeting = pickRandom(GREETINGS);
-      const randomOpener = pickRandom(OPENERS);
-      const randomSignOff = pickRandom(SIGN_OFFS);
+      const randomGreeting = pickRandom(GREETINGS || ["Hi,", "Hello,"]);
+      const randomOpener = pickRandom(OPENERS || ["Hope this note finds you well."]);
+      const randomSignOff = pickRandom(SIGN_OFFS || ["Best regards,", "Thanks,"]);
 
-      // रैंडम ग्रीटिंग + रैंडम ओपनर + यूजर की क्लीन बॉडी + रैंडम साइनऑफ + फाइनल नाम
+      // 💡 100% असली ह्यूमन प्लेन-टेक्स्ट स्ट्रक्चर
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n\n${finalSignoffName}`;
 
       try {
@@ -189,6 +185,7 @@ export async function POST(req: Request) {
     }
 
     transporter.close();
+    transporter = null;
 
     return NextResponse.json({
       report: logs,
@@ -198,6 +195,9 @@ export async function POST(req: Request) {
       accountErrorType: isQuotaHit ? "QUOTA_EXCEEDED" : null,
     });
   } catch (error: any) {
+    if (transporter) {
+      try { transporter.close(); } catch (_) {}
+    }
     return NextResponse.json(
       { error: error.message || "Internal server error." },
       { status: 500 }

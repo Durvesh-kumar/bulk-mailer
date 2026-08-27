@@ -2,7 +2,7 @@
 import { connectToCentralDB } from "./db/centralDb";
 import { getLicenseModel } from "@/lib/models/License";
 
-type CachedLicense = {
+export type CachedLicense = {
   _id: string;
   status: string;
   lockedDeviceId: string;
@@ -10,21 +10,19 @@ type CachedLicense = {
   expiresAt?: Date;
 };
 
-// Node.js ग्लोबल इन-मेमोरी मैप (Zero External Cost)
+// Node.js ग्लोबल इन-मेमोरी मैप
 const globalCache = global as unknown as { licenseMemoryMap?: Map<string, CachedLicense> };
 export const licenseMemoryMap = globalCache.licenseMemoryMap || new Map<string, CachedLicense>();
 if (process.env.NODE_ENV !== "production") globalCache.licenseMemoryMap = licenseMemoryMap;
 
-// ⚡ 1. कैशे से डेटा पढ़ें (Zero-DB: जब तक एडमिन अपडेट न करे, RAM से सीधा रिटर्न)
-export async function getLicenseWithCache(appDomain: string) {
+// ⚡ 1. कैशे से डेटा पढ़ें (Zero-DB Query जब तक कैशे में मौजूद है)
+export async function getLicenseWithCache(appDomain: string): Promise<CachedLicense | null> {
   const cached = licenseMemoryMap.get(appDomain);
 
-  // अगर RAM में पहले से मौजूद है, तो डेटाबेस को कभी मत छुओ (0 DB Query)
   if (cached) {
     return cached;
   }
 
-  // केवल पहली बार (या एडमिन द्वारा कैशे पर्ज होने पर) 1 बार DB से फेच होगा
   const centralConn = await connectToCentralDB();
   const License = getLicenseModel(centralConn);
   const license = await License.findOne(
@@ -37,17 +35,16 @@ export async function getLicenseWithCache(appDomain: string) {
   const dataToCache: CachedLicense = {
     _id: String(license._id),
     status: license.status,
-    lockedDeviceId: license.lockedDeviceId || "",
+    lockedDeviceId: license.lockedDeviceId ? String(license.lockedDeviceId).trim() : "",
     tokenVersion: license.tokenVersion || 1,
     expiresAt: license.expiresAt ? new Date(license.expiresAt) : undefined,
   };
 
-  // RAM कैशे में स्टोर करो
   licenseMemoryMap.set(appDomain, dataToCache);
   return dataToCache;
 }
 
-// ⚡ 2. जब एडमिन स्टेटस बदले या मशीन रीसेट करे, तभी कैशे साफ़ होगा
+// ⚡ 2. जब एडमिन स्टेटस बदले, रीसेट करे या नई बाइंडिंग हो — तुरंत फ़ोर्सफुल पर्ज
 export function forcePurgeLicenseCache(appDomain: string) {
   licenseMemoryMap.delete(appDomain);
 }

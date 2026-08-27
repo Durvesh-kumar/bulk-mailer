@@ -4,12 +4,11 @@ import { LicenseModel } from "@/lib/models/License";
 import { cleanAppDomain } from "@/lib/licenseGuard";
 import { connectToCentralDB } from "@/lib/db/centralDb";
 import { getTenantDB } from "@/lib/db/tenantDb";
-import { SmtpVaultModel, getSmtpVaultModel } from "@/lib/models/SmtpVault";
-import { forcePurgeLicenseCache } from "@/lib/licenseCache"; // 👈 [FIX] सीधे RAM कैशे इनवैलिडेटर
+import { getSmtpVaultModel } from "@/lib/models/SmtpVault";
+import { forcePurgeLicenseCache } from "@/lib/licenseCache";
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET_KEY;
 
-// 📅 शुद्ध कैलेंडर मंथ/ईयर जोड़ने वाला फंक्शन
 function addMonthsToDate(fromDate: Date, monthsToAdd: number): Date {
   const date = new Date(fromDate);
   const originalDay = date.getDate();
@@ -81,7 +80,7 @@ export async function POST(req: Request) {
         expiresAt: expiry,
       });
 
-      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
+      forcePurgeLicenseCache(targetDomain);
 
       return NextResponse.json({
         success: true,
@@ -102,10 +101,10 @@ export async function POST(req: Request) {
       const newExpiry = addMonthsToDate(baseDate, monthsToAdd);
       lic.expiresAt = newExpiry;
       lic.status = "ACTIVE";
-      lic.tokenVersion = (lic.tokenVersion || 1) + 1; // 👈 टोकन वर्जन अपडेट
+      lic.tokenVersion = (lic.tokenVersion || 1) + 1;
       await lic.save();
 
-      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
+      forcePurgeLicenseCache(targetDomain);
 
       const periodLabel = monthsToAdd === 12 ? "1 Year" : `${monthsToAdd} Month(s)`;
 
@@ -122,10 +121,10 @@ export async function POST(req: Request) {
 
       lic.lockedDeviceId = null;
       lic.lastResetAt = new Date();
-      lic.tokenVersion = (lic.tokenVersion || 1) + 1; // 👈 पुराना टोकन इनवैलिड
+      lic.tokenVersion = (lic.tokenVersion || 1) + 1;
       await lic.save();
 
-      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
+      forcePurgeLicenseCache(targetDomain);
 
       return NextResponse.json({
         success: true,
@@ -140,10 +139,10 @@ export async function POST(req: Request) {
 
       lic.status = lic.status === "ACTIVE" ? "SUSPENDED" : "ACTIVE";
       lic.lastResetAt = new Date();
-      lic.tokenVersion = (lic.tokenVersion || 1) + 1; // 👈 पुराना टोकन तुरंत इनवैलिड
+      lic.tokenVersion = (lic.tokenVersion || 1) + 1;
       await lic.save();
 
-      forcePurgeLicenseCache(targetDomain); // ⚡ कैशे पर्ज
+      forcePurgeLicenseCache(targetDomain);
 
       return NextResponse.json({
         success: true,
@@ -206,7 +205,7 @@ export async function DELETE(req: Request) {
     }
 
     if (deletedLicense.appDomain) {
-      forcePurgeLicenseCache(deletedLicense.appDomain); // ⚡ कैशे से भी डिलीट
+      forcePurgeLicenseCache(deletedLicense.appDomain);
     }
 
     return NextResponse.json({

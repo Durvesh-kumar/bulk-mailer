@@ -6,8 +6,8 @@ import React, { useState } from "react";
 interface SuspendedScreenProps {
   machineId: string;
   appDomain?: string; // e.g. "mailer.clientdomain.com"
-  userType?: "NEW_USER" | "SUSPENDED" | "EXPIRED";
-  expiryDate?: string; // e.g. "21 Aug 2026"
+  userType?: string;
+  expiryDate?: string | undefined; // e.g. "21 Aug 2026"
   adminPhone?: string;
   adminEmail?: string;
 }

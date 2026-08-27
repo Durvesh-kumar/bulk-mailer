@@ -1,7 +1,8 @@
 // src/app/admin/page.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import Link from "next/link";
 
 interface License {
   _id: string;
@@ -40,7 +41,6 @@ function calculateFutureExpiry(months: number, days?: number): { formatted: stri
 }
 
 export default function AdminDashboard() {
-  // 🔒 केवल In-Memory State (लोकल स्टोरेज / सेशन स्टोरेज में 0% सेव)
   const [adminKey, setAdminKey] = useState("");
   const [isAuth, setIsAuth] = useState(false);
   const [licenses, setLicenses] = useState<License[]>([]);
@@ -59,6 +59,17 @@ export default function AdminDashboard() {
 
   const preview = calculateFutureExpiry(Number(validityMonths) || 1, validityDays || undefined);
 
+  // 🛡️ 1. करंट एक्टिव टैब सेशन चेक करें (ब्राउज़र बंद होते ही 100% गायब)
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const activeSessionKey = sessionStorage.getItem("admin_session_key");
+      if (activeSessionKey && activeSessionKey.trim().length > 0) {
+        setAdminKey(activeSessionKey);
+        fetchLicenses(activeSessionKey);
+      }
+    }
+  }, []);
+
   const fetchLicenses = async (key = adminKey) => {
     if (!key.trim()) {
       setFeedback("Admin Secret Key is required.");
@@ -74,9 +85,16 @@ export default function AdminDashboard() {
       if (res.ok) {
         setLicenses(data.licenses || []);
         setIsAuth(true);
+        // 🔒 केवल sessionStorage में सेव करें (टैब/ब्राउज़र बंद होते ही डिलीट)
+        if (typeof window !== "undefined") {
+          sessionStorage.setItem("admin_session_key", key.trim());
+        }
       } else {
         setFeedback(data.error || "Invalid Admin Key. Access Denied.");
         setIsAuth(false);
+        if (typeof window !== "undefined") {
+          sessionStorage.removeItem("admin_session_key");
+        }
       }
     } catch {
       setFeedback("Failed to connect to the server.");
@@ -198,7 +216,6 @@ export default function AdminDashboard() {
     }
   };
 
-  // 🗑️ Permanent Delete with Cascading Clean-up
   const handleDeleteLicense = async (appDomain: string) => {
     if (!confirm(`⚠️ PERMANENT DELETE WARNING:\nAre you sure you want to delete [${appDomain}]?\nThis will remove the license and all associated tenant vault data permanently!`)) return;
 
@@ -227,9 +244,12 @@ export default function AdminDashboard() {
     setIsAuth(false);
     setLicenses([]);
     setFeedback("");
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem("admin_session_key");
+      sessionStorage.clear();
+    }
   };
 
-  // 🎯 Filtered Licenses Calculation
   const filteredLicenses = licenses.filter((lic) => {
     const q = searchQuery.toLowerCase().trim();
     const matchesSearch =
@@ -243,7 +263,7 @@ export default function AdminDashboard() {
     return matchesSearch && matchesStatus;
   });
 
-  // 🔐 1. कड़ा लॉगिन गेट
+  // 🔐 1. लॉगिन गेट
   if (!isAuth) {
     return (
       <main className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
@@ -283,7 +303,7 @@ export default function AdminDashboard() {
     );
   }
 
-  // 🛡️ 2. असली ऑथेंटिकेटेड डैशबोर्ड
+  // 🛡️ 2. ऑथेंटिकेटेड डैशबोर्ड
   return (
     <main className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-8 overflow-x-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
       <div className="max-w-6xl mx-auto space-y-6">
@@ -297,6 +317,19 @@ export default function AdminDashboard() {
             <p className="text-[11px] text-slate-400 mt-0.5">Hardware Lock & Licensing Controller</p>
           </div>
           <div className="flex items-center gap-2">
+            {/* 🎯 वार्म-अप इंजन बटन (क्लिक पर की सिंक पक्की करेगा) */}
+            <Link
+              href="/admin/warmup"
+              onClick={() => {
+                if (adminKey && typeof window !== "undefined") {
+                  sessionStorage.setItem("admin_session_key", adminKey.trim());
+                }
+              }}
+              className="text-xs bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 px-3 py-1.5 rounded-xl transition font-semibold flex items-center gap-1.5 shadow-sm cursor-pointer"
+            >
+              <span>⚡</span> Warm-Up Engine
+            </Link>
+
             <button
               onClick={() => fetchLicenses(adminKey)}
               className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 px-3 py-1.5 rounded-xl transition cursor-pointer"
@@ -453,7 +486,6 @@ export default function AdminDashboard() {
             )}
           </div>
 
-          {/* Status Filter Tabs */}
           <div className="flex items-center gap-1.5 w-full sm:w-auto">
             {(["ALL", "ACTIVE", "SUSPENDED"] as const).map((status) => (
               <button

@@ -8,8 +8,6 @@ const JWT_SECRET: string = process.env.JWT_SECRET_KEY || (() => {
   throw new Error("JWT_SECRET_KEY is missing in environment variables!");
 })();
 
-export const ENABLE_DEVICE_LOCK = true;
-
 export function cleanAppDomain(input: string): string {
   if (!input) return "localhost";
   return input
@@ -21,139 +19,121 @@ export function cleanAppDomain(input: string): string {
     .split(":")[0];
 }
 
-export interface GuardResult {
-  machineId?: string;
-  ok: boolean;
-  reason?: "NEW_DEVICE" | "SUSPENDED" | "EXPIRED" | "ACTIVE" | "DB_ERROR";
-  expiryDate?: string;
-  userId?: string;
-  licenseId?: string;
-  error?: string;
-  sessionToken?: string;
-  clearClientSession?: boolean;
-}
-
 export async function verifyLicenseAndDevice(
   rawAppDomain: string,
   machineId?: string | null,
   sessionToken?: string | null
-): Promise<GuardResult> {
-  if (!ENABLE_DEVICE_LOCK) return { ok: true, reason: "ACTIVE", machineId: machineId || undefined };
-
+) {
   const appDomain = cleanAppDomain(rawAppDomain);
-  const effectiveMachineId = machineId ? machineId.trim() : "";
+  const currentMachine = machineId ? machineId.trim() : "";
 
-  if (!effectiveMachineId) {
-    return { ok: false, reason: "NEW_DEVICE", error: "Hardware fingerprint missing.", clearClientSession: true };
+  if (!currentMachine) {
+    return { 
+      ok: false, 
+      reason: "MISSING_HARDWARE_ID", 
+      error: "Hardware fingerprint missing.", 
+      clearClientSession: true,
+      expiryDate: null,
+      expiresAt: null
+    };
   }
 
   try {
-    // ⚡ स्टेप 1: सीधे RAM कैशे से उठाओ (0 DB Query)
+    // 1. लाइसेंस निकालो
     let license = await getLicenseWithCache(appDomain);
 
     if (!license) {
-      return {
-        ok: false,
-        reason: "NEW_DEVICE",
-        error: `App Domain (${appDomain}) is not registered. Contact Admin.`,
+      return { 
+        ok: false, 
+        reason: "NEW_USER", 
+        error: `Domain (${appDomain}) not registered.`, 
         clearClientSession: true,
+        expiryDate: null,
+        expiresAt: null
       };
     }
 
-    const formattedExpiry = license.expiresAt
-      ? new Date(license.expiresAt).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
-      : "N/A";
+    const licenseExpiry = license.expiresAt ? new Date(license.expiresAt).toISOString() : null;
 
-    // ⚡ स्टेप 2: स्टेटस चेक
     if (license.status !== "ACTIVE") {
-      return {
-        ok: false,
-        reason: "SUSPENDED",
-        expiryDate: formattedExpiry,
-        error: "License Suspended. Contact Admin.",
+      return { 
+        ok: false, 
+        reason: "SUSPENDED", 
+        error: "License Suspended. Contact Admin.", 
         clearClientSession: true,
+        expiryDate: licenseExpiry,
+        expiresAt: licenseExpiry
       };
     }
 
-    // ⚡ स्टेप 3: एक्सपायरी चेक
     if (license.expiresAt && new Date() > new Date(license.expiresAt)) {
-      return {
-        ok: false,
-        reason: "EXPIRED",
-        expiryDate: formattedExpiry,
-        error: `Subscription Expired on ${formattedExpiry}.`,
+      return { 
+        ok: false, 
+        reason: "EXPIRED", 
+        error: "Subscription Expired.", 
         clearClientSession: true,
+        expiryDate: licenseExpiry,
+        expiresAt: licenseExpiry
       };
     }
 
-    // ⚡ स्टेप 4: हार्डवेयर बाइंडिंग & मिसमैच चेक
+    // 2. डिवाइस बाइंडिंग चेक
     if (!license.lockedDeviceId || license.lockedDeviceId.trim() === "") {
       const centralConn = await connectToCentralDB();
       const License = getLicenseModel(centralConn);
+      
       await License.updateOne(
         { appDomain },
-        { lockedDeviceId: effectiveMachineId, lastBoundAt: new Date() }
+        { lockedDeviceId: currentMachine, lastBoundAt: new Date() }
       );
-      license.lockedDeviceId = effectiveMachineId;
-      forcePurgeLicenseCache(appDomain); // नई बाइंडिंग के बाद कैशे रिफ्रेश
-    } else if (license.lockedDeviceId !== effectiveMachineId) {
+      
+      license.lockedDeviceId = currentMachine;
+      forcePurgeLicenseCache(appDomain);
+    } 
+    else if (license.lockedDeviceId !== currentMachine) {
       return {
         ok: false,
         reason: "NEW_DEVICE",
-        expiryDate: formattedExpiry,
         error: "Device mismatch! Please contact Admin to reset your hardware binding.",
         clearClientSession: true,
+        expiryDate: licenseExpiry,
+        expiresAt: licenseExpiry
       };
     }
 
-    // ⚡ स्टेप 5: 24-घंटे का JWT और टोकन वर्जन मैच
+    // 3. टोकन जनरेट करो
     const currentVersion = license.tokenVersion || 1;
     const resolvedUserId = String(license._id);
-    let shouldGenerateNewToken = true;
-    let finalSessionToken = sessionToken || "";
 
-    if (sessionToken && sessionToken !== "SECURE_AUTH") {
-      try {
-        const decoded: any = jwt.verify(sessionToken, JWT_SECRET);
-        if (
-          decoded &&
-          decoded.domain === appDomain &&
-          decoded.machineId === effectiveMachineId &&
-          decoded.tokenVersion === currentVersion // अगर एडमिन ने वर्जन बदला, तो यह फेल होगा
-        ) {
-          shouldGenerateNewToken = false;
-        }
-      } catch {
-        shouldGenerateNewToken = true;
-      }
-    }
-
-    // ⚡ स्टेप 6: अगर टोकन नहीं है या एडमिन ने फ़ोर्स अपडेट किया है -> नया 24-घंटे का टोकन
-    if (shouldGenerateNewToken) {
-      finalSessionToken = jwt.sign(
-        {
-          domain: appDomain,
-          machineId: effectiveMachineId,
-          userId: resolvedUserId,
-          licenseId: resolvedUserId,
-          tokenVersion: currentVersion, // टोकन में वर्जन एम्बेड
-        },
-        JWT_SECRET,
-        { expiresIn: "24h" }
-      );
-    }
+    const token = jwt.sign(
+      {
+        domain: appDomain,
+        machineId: currentMachine,
+        userId: resolvedUserId,
+        licenseId: resolvedUserId,
+        tokenVersion: currentVersion,
+      },
+      JWT_SECRET,
+      { expiresIn: "24h" }
+    );
 
     return {
       ok: true,
       reason: "ACTIVE",
-      sessionToken: finalSessionToken,
-      machineId: effectiveMachineId,
+      sessionToken: token,
+      machineId: currentMachine,
       userId: resolvedUserId,
       licenseId: resolvedUserId,
-      expiryDate: formattedExpiry,
+      expiryDate: licenseExpiry,
+      expiresAt: licenseExpiry
     };
   } catch (err: any) {
-    console.error("License check error:", err);
-    return { ok: false, reason: "DB_ERROR", error: "Database Error: " + err.message };
+    return { 
+      ok: false, 
+      reason: "SERVER_ERROR", 
+      error: "DB Error: " + err.message,
+      expiryDate: null,
+      expiresAt: null
+    };
   }
 }
