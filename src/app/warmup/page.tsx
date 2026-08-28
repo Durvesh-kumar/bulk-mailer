@@ -21,6 +21,8 @@ export default function DiagnosticsDatabaseQueueDashboard() {
     stats,
     intervalSeconds,
     setIntervalSeconds,
+    lotSizePerAccount,
+    setLotSizePerAccount,
   } = useWarmupQueue(machineId);
 
   const [searchSender, setSearchSender] = useState<string>("");
@@ -128,22 +130,44 @@ export default function DiagnosticsDatabaseQueueDashboard() {
           </div>
         </div>
 
-        {/* Cadence Input */}
-        <div className="bg-[#111728] border border-gray-800 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="text-xs text-gray-300">
-            <span className="font-bold text-indigo-400">⏱️ Dispatch Cadence:</span> Set the wait duration between consecutive peer handshakes.
+        {/* ⚙️ Controls Bar: Cadence & Lot Size */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 bg-[#111728] border border-gray-800 p-4 rounded-2xl">
+          <div className="flex items-center justify-between gap-3 bg-[#0c1017] p-3 rounded-xl border border-gray-800">
+            <div>
+              <span className="text-xs font-bold text-indigo-400 block">⏱️ Dispatch Cadence</span>
+              <span className="text-[10px] text-gray-400">Delay between handshakes</span>
+            </div>
+            <div className="w-28">
+              <input
+                type="number"
+                min={5}
+                max={300}
+                disabled={isRunning}
+                value={intervalSeconds}
+                onChange={(e) => setIntervalSeconds(Math.max(5, Number(e.target.value) || 5))}
+                placeholder="15s"
+                className="w-full bg-[#111728] border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-center font-bold text-indigo-300 outline-none"
+              />
+            </div>
           </div>
-          <div className="w-full sm:w-48">
-            <InputField
-              type="number"
-              min={5}
-              max={300}
-              disabled={isRunning}
-              value={intervalSeconds}
-              onChange={(e) => setIntervalSeconds(Number(e.target.value) || 15)}
-              placeholder="Seconds (e.g. 15)"
-              className="text-center font-bold text-indigo-300"
-            />
+
+          <div className="flex items-center justify-between gap-3 bg-[#0c1017] p-3 rounded-xl border border-gray-800">
+            <div>
+              <span className="text-xs font-bold text-emerald-400 block">🎯 Lot Size Per Sender</span>
+              <span className="text-[10px] text-gray-400">Max warmup emails per account</span>
+            </div>
+            <div className="w-28">
+              <input
+                type="number"
+                min={1}
+                max={50}
+                disabled={isRunning}
+                value={lotSizePerAccount}
+                onChange={(e) => setLotSizePerAccount(Math.max(1, Number(e.target.value) || 1))}
+                placeholder="10"
+                className="w-full bg-[#111728] border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-center font-bold text-emerald-400 outline-none"
+              />
+            </div>
           </div>
         </div>
 
@@ -257,7 +281,7 @@ export default function DiagnosticsDatabaseQueueDashboard() {
               <span className={`w-2 h-2 rounded-full ${isRunning ? "bg-indigo-400 animate-ping" : "bg-gray-600"}`}></span>
               Live P2P Handshake Execution Stream
             </span>
-            <span className="text-[11px] text-gray-500 font-mono">{intervalSeconds}s Interval</span>
+            <span className="text-[11px] text-gray-500 font-mono">{intervalSeconds}s Interval | Lot: {lotSizePerAccount}/Sender</span>
           </div>
 
           <div className="h-44 overflow-y-auto space-y-2 pr-2 font-mono text-xs text-gray-300">

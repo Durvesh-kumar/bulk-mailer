@@ -1,20 +1,13 @@
-import { NextResponse } from "next/server";
+// src/app/api/admin/warmup-worker/route.ts
+import { NextResponse, NextRequest } from "next/server";
 import { getTenantDB } from "@/lib/db/tenantDb";
 import { getSmtpVaultModel } from "@/lib/models/SmtpVault";
 import { decryptPassword } from "@/lib/encryption";
 import nodemailer from "nodemailer";
 import { ImapFlow } from "imapflow";
-import { getRandomWarmupMessage, WARMUP_SUBJECTS } from "@/lib/warmupTopics";
+import { getRandomWarmupMessage } from "@/lib/warmupTopics";
 
-interface CachedAccount {
-  email: string;
-  appPassword: string;
-  senderName: string;
-}
-
-let memoryAccountPool: CachedAccount[] = [];
-let lastDbFetchTime = 0;
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 मिनट RAM कैश
+const WARMUP_TAG = "[WU-VERIFIED]";
 
 const REPLIES = [
   "Thanks for the update. Looks good to me!",
@@ -25,84 +18,80 @@ const REPLIES = [
 
 const pickRandom = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
 
-function isWarmupSubject(subject: string): boolean {
-  if (!subject) return false;
-  const cleanSub = subject.replace(/^(Re:\s*|Fwd:\s*)/i, "").trim().toLowerCase();
-  return WARMUP_SUBJECTS.some((target) => cleanSub.includes(target.toLowerCase()));
-}
-
-async function getCachedAccounts(): Promise<CachedAccount[]> {
-  const now = Date.now();
-  if (memoryAccountPool.length > 0 && now - lastDbFetchTime < CACHE_TTL_MS) {
-    return memoryAccountPool;
-  }
-
+// 1. GET: फ़्रंटएंड को कतार (Queue) बनाने के लिए सिर्फ 1 बार अकाउंट्स देना
+export async function GET() {
   try {
     const tenantDB = await getTenantDB();
     const VaultModel = getSmtpVaultModel(tenantDB);
-    const allVaults = await VaultModel.find(
-      {},
-      { "accounts.email": 1, "accounts.appPassword": 1, "accounts.senderName": 1 }
-    ).lean();
+    const allVaults = await VaultModel.find({}).lean();
 
-    const freshPool: CachedAccount[] = [];
+    const pool: any[] = [];
     const seen = new Set<string>();
 
     allVaults.forEach((v: any) => {
       if (Array.isArray(v.accounts)) {
         v.accounts.forEach((acc: any) => {
-          if (acc.email && acc.appPassword) {
-            const clean = acc.email.toLowerCase().trim();
-            if (!seen.has(clean)) {
-              seen.add(clean);
-              freshPool.push({
-                email: clean,
-                appPassword: acc.appPassword,
-                senderName: acc.senderName || "Warmup Node",
-              });
-            }
+          const email = (acc.email || "").toLowerCase().trim();
+          const pass = acc.appPassword || acc.password || acc.smtpPassword;
+          if (email && pass && !seen.has(email)) {
+            seen.add(email);
+            pool.push({
+              email,
+              appPassword: String(pass),
+              senderName: acc.senderName || "Admin Peer",
+            });
           }
         });
       }
     });
 
-    memoryAccountPool = freshPool;
-    lastDbFetchTime = now;
-  } catch (err) {
-    console.error("[Warmup Worker] DB Cache refresh error:", err);
+    return NextResponse.json({
+      status: "READY",
+      pool,
+      totalCount: pool.length,
+    });
+  } catch (err: any) {
+    console.error("GET /api/admin/warmup-worker Error:", err);
+    return NextResponse.json({ status: "ERROR", error: err.message, pool: [] }, { status: 500 });
   }
-
-  return memoryAccountPool;
 }
 
-// 🛡️ 26-घंटे का IMAP स्पैम रेस्क्यू व 2-Way रिप्लाई फ़ंक्शन
-async function performRescueAndReply(account: CachedAccount, decryptedPass: string) {
+// 🛡️ IMAP रेस्क्यू + 2-Way रिप्लाई + ऑटो-आर्काइव (Zero DB Hit)
+async function performRescueAndReply(receiver: any, decryptedPass: string): Promise<number> {
   let imapClient: ImapFlow | null = null;
-  const filterSince = new Date(Date.now() - 26 * 60 * 60 * 1000);
+  const filterSince = new Date(Date.now() - 12 * 60 * 60 * 1000);
   let targetSubject = "";
   let targetSender = "";
+  let rescuedCount = 0;
 
   try {
     imapClient = new ImapFlow({
       host: "imap.gmail.com",
       port: 993,
       secure: true,
-      auth: { user: account.email, pass: decryptedPass },
+      auth: { user: receiver.email, pass: decryptedPass },
       logger: false,
+      socketTimeout: 8000,
+      connectionTimeout: 8000,
     });
 
+    imapClient.on("error", () => {});
     await imapClient.connect();
 
-    // 1. स्पैम फ़ोल्डर रेस्क्यू
+    // 1. स्पैम फ़ोल्डर से रेस्क्यू
     try {
       const spamLock = await imapClient.getMailboxLock("[Gmail]/Spam");
       try {
-        const spamMessages = imapClient.fetch({ since: filterSince }, { envelope: true });
+        const spamMessages = imapClient.fetch(
+          { since: filterSince, seen: false },
+          { envelope: true, flags: true }
+        );
         for await (let msg of spamMessages) {
           const sub = msg.envelope?.subject || "";
-          if (isWarmupSubject(sub)) {
+          if (sub.includes(WARMUP_TAG)) {
             await imapClient.messageMove(msg.seq, "INBOX");
             targetSubject = sub;
+            rescuedCount++;
             if (msg.envelope?.from?.[0]?.address) targetSender = msg.envelope.from[0].address;
           }
         }
@@ -111,17 +100,36 @@ async function performRescueAndReply(account: CachedAccount, decryptedPass: stri
       }
     } catch (_) {}
 
-    // 2. इनबॉक्स स्टार व इंपॉर्टेंट मार्क
+    // 2. 2-Way ऑटो-रिप्लाई
+    if (targetSender && targetSubject) {
+      const transporter = nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: { user: receiver.email, pass: decryptedPass },
+        connectionTimeout: 8000,
+      });
+
+      await transporter.sendMail({
+        from: `"${receiver.senderName || "Warmup Peer"}" <${receiver.email}>`,
+        to: targetSender.toLowerCase().trim(),
+        subject: `Re: ${targetSubject.replace(WARMUP_TAG, "").trim()}`,
+        text: pickRandom(REPLIES),
+      });
+
+      transporter.close();
+    }
+
+    // 3. इनबॉक्स से हटाकर Archive में डालना
     try {
       const inboxLock = await imapClient.getMailboxLock("INBOX");
       try {
         const inboxMessages = imapClient.fetch({ since: filterSince }, { envelope: true });
         for await (let msg of inboxMessages) {
           const sub = msg.envelope?.subject || "";
-          if (isWarmupSubject(sub)) {
-            await imapClient.messageFlagsAdd(msg.seq, ["\\Seen", "\\Flagged"]);
-            if (!targetSubject) targetSubject = sub;
-            if (!targetSender && msg.envelope?.from?.[0]?.address) targetSender = msg.envelope.from[0].address;
+          if (sub.includes(WARMUP_TAG)) {
+            await imapClient.messageFlagsAdd(msg.seq, ["\\Seen"]);
+            await imapClient.messageDelete(msg.seq);
           }
         }
       } finally {
@@ -131,113 +139,88 @@ async function performRescueAndReply(account: CachedAccount, decryptedPass: stri
 
     await imapClient.logout();
     imapClient = null;
-
-    // 3. 2-Way रिप्लाई डिस्पैच
-    if (targetSender && targetSubject) {
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: account.email, pass: decryptedPass },
-        name: "mail.google.com",
-      } as any);
-
-      const replySubject = targetSubject.startsWith("Re:") ? targetSubject : `Re: ${targetSubject}`;
-      await transporter.sendMail({
-        from: `"${account.senderName}" <${account.email}>`,
-        to: targetSender.toLowerCase().trim(),
-        subject: replySubject,
-        text: pickRandom(REPLIES),
-      });
-
-      transporter.close();
-    }
   } catch (e) {
     if (imapClient) {
       try { await imapClient.logout(); } catch (_) {}
     }
   }
+
+  return rescuedCount;
 }
 
-export async function GET(req: Request) {
+// 🎯 POST: फ़्रंटएंड से डायरेक्ट डेटा प्रोसेस होगा (Zero DB Hit)
+export async function POST(req: NextRequest) {
   try {
-    const host = req.headers.get("host") || "localhost:3000";
-    const protocol = host.includes("localhost") ? "http" : "https";
+    const bodyData = await req.json();
+    const { sender, receiver } = bodyData;
 
-    const controlRes = await fetch(`${protocol}://${host}/api/admin/warmup-control`, {
-      cache: "no-store",
-    });
-    const { isRunning, batchPerMinute } = await controlRes.json();
-
-    if (!isRunning) {
-      return NextResponse.json({ status: "PAUSED", dispatched: 0, failed: 0 });
+    if (!sender?.email || !sender?.appPassword || !receiver?.email) {
+      return NextResponse.json(
+        { error: "Sender (with appPassword) and Receiver details required" },
+        { status: 400 }
+      );
     }
 
-    const accountPool = await getCachedAccounts();
-    if (accountPool.length < 2) {
-      return NextResponse.json({ status: "WAITING", message: "Need >= 2 active accounts" });
-    }
-
-    const targetCount = batchPerMinute || 3;
-    let dispatched = 0;
-    let failed = 0;
-
-    for (let i = 0; i < targetCount; i++) {
-      const sender = accountPool[Math.floor(Math.random() * accountPool.length)];
-      const validReceivers = accountPool.filter((a) => a.email !== sender.email);
-      if (validReceivers.length === 0) continue;
-
-      const receiver = validReceivers[Math.floor(Math.random() * validReceivers.length)];
-
-      let senderPass = sender.appPassword;
-      if (senderPass.includes(":") || senderPass.length > 20) {
-        try { senderPass = decryptPassword(senderPass); } catch { failed++; continue; }
-      }
-      senderPass = senderPass.replace(/\s+/g, "");
-
-      let receiverPass = receiver.appPassword;
-      if (receiverPass.includes(":") || receiverPass.length > 20) {
-        try { receiverPass = decryptPassword(receiverPass); } catch {}
-      }
-      receiverPass = receiverPass.replace(/\s+/g, "");
-
-      const { subject, body } = getRandomWarmupMessage();
-
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: { user: sender.email, pass: senderPass },
-        name: "mail.google.com",
-      } as any);
-
+    // 1. सेंडर पासवर्ड डिक्रिप्ट
+    let senderPass = sender.appPassword;
+    if (senderPass.includes(":") || senderPass.length > 20) {
       try {
-        await transporter.sendMail({
-          from: `"${sender.senderName}" <${sender.email}>`,
-          to: receiver.email,
-          subject,
-          text: body,
-        });
-        dispatched++;
-        transporter.close();
-
-        // 🔄 रिसीवर पर तुरंत 26-घंटे का स्पैम रेस्क्यू और 2-Way रिप्लाई
-        if (receiverPass) {
-          performRescueAndReply(receiver, receiverPass).catch(() => {});
-        }
-      } catch (err) {
-        failed++;
-        if (transporter) {
-          try { transporter.close(); } catch (_) {}
-        }
-        console.error(`Warmup drop [${sender.email} -> ${receiver.email}]:`, err);
+        senderPass = decryptPassword(senderPass);
+      } catch (e: any) {
+        return NextResponse.json({ error: `Sender Decrypt Error: ${e.message}`, failed: true }, { status: 400 });
       }
+    }
+    senderPass = senderPass.replace(/\s+/g, "");
+
+    // 2. रिसीवर पासवर्ड डिक्रिप्ट
+    let receiverPass = receiver.appPassword || "";
+    if (receiverPass.includes(":") || receiverPass.length > 20) {
+      try {
+        receiverPass = decryptPassword(receiverPass);
+      } catch (_) {}
+    }
+    receiverPass = receiverPass.replace(/\s+/g, "");
+
+    const { subject, body } = getRandomWarmupMessage();
+    const taggedSubject = `${subject} ${WARMUP_TAG}`;
+
+    const transporter = nodemailer.createTransport({
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      auth: { user: sender.email, pass: senderPass },
+      connectionTimeout: 8000,
+    });
+
+    await transporter.sendMail({
+      from: `"${sender.senderName || "Sender Node"}" <${sender.email}>`,
+      to: receiver.email,
+      subject: taggedSubject,
+      text: body,
+    });
+
+    transporter.close();
+
+    // 🔄 Non-blocking IMAP रेस्क्यू
+    let rescuedCount = 0;
+    if (receiverPass) {
+      performRescueAndReply(receiver, receiverPass).then((cnt) => {
+        rescuedCount = cnt;
+      }).catch(() => {});
     }
 
     return NextResponse.json({
       status: "EXECUTED",
-      dispatched,
-      failed,
-      cachedAccountsCount: accountPool.length,
-      nextDbRefreshInSeconds: Math.max(0, Math.round((CACHE_TTL_MS - (Date.now() - lastDbFetchTime)) / 1000)),
+      success: true,
+      dispatched: 1,
+      failed: 0,
+      rescued: rescuedCount,
+      sender: sender.email,
+      receiver: receiver.email,
+      log: `✅ [${sender.email}] ➡️ [${receiver.email}] (Dispatched & Archived)`,
     });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    console.error("Warmup Worker Dispatch Error:", err);
+    return NextResponse.json({ status: "FAILED", error: err.message, failed: 1, dispatched: 0, rescued: 0 }, { status: 500 });
   }
 }

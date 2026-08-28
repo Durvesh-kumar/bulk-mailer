@@ -3,11 +3,8 @@
 
 import { useEffect, useState } from "react";
 import { getClientMachineId } from "@/lib/fingerprint";
+import { PENDING_QUEUE_STORAGE_KEY, SESSION_TOKEN_KEY } from "@/types/vault";
 
-const SESSION_TOKEN_KEY = "reachout_session_token";
-const PENDING_QUEUE_STORAGE_KEY = "reachout_pending_queue";
-
-// 1. TypeScript के लिए सटीक Types डिफाइन करें
 export type LicenseUserType = "NEW_USER" | "EXPIRED" | "SUSPENDED" | "ACTIVE";
 
 export function useLicenseGuard() {
@@ -17,6 +14,7 @@ export function useLicenseGuard() {
   const [machineId, setMachineId] = useState<string>("");
   const [appDomain, setAppDomain] = useState<string>("");
   const [expiryDate, setExpiryDate] = useState<string | null>(null);
+  const [sessionToken, setSessionToken] = useState<string>("");
 
   // पेंडिंग क्यू स्टेट्स
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
@@ -34,7 +32,10 @@ export function useLicenseGuard() {
         const currentMachineId = await getClientMachineId();
         setMachineId(currentMachineId);
 
-        const existingSessionToken = localStorage.getItem(SESSION_TOKEN_KEY);
+        const existingSessionToken =
+          typeof window !== "undefined"
+            ? localStorage.getItem(SESSION_TOKEN_KEY) || ""
+            : "";
 
         const res = await fetch("/api/check-license", {
           method: "POST",
@@ -54,10 +55,10 @@ export function useLicenseGuard() {
         if (!res.ok || !data.allowed) {
           if (data.clearSession) {
             localStorage.removeItem(SESSION_TOKEN_KEY);
+            setSessionToken("");
           }
           setIsSuspended(true);
 
-          // Type-safe assignment (Type Error Fix)
           const resolvedType: LicenseUserType =
             data.reason === "EXPIRED"
               ? "EXPIRED"
@@ -74,8 +75,10 @@ export function useLicenseGuard() {
           setIsSuspended(false);
           setUserType("ACTIVE");
 
-          if (data.sessionToken) {
-            localStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+          const validToken = data.sessionToken || existingSessionToken || "";
+          if (validToken) {
+            localStorage.setItem(SESSION_TOKEN_KEY, validToken);
+            setSessionToken(validToken);
           }
 
           try {
@@ -99,6 +102,7 @@ export function useLicenseGuard() {
       } catch (err) {
         console.error("License check failed:", err);
         localStorage.removeItem(SESSION_TOKEN_KEY);
+        setSessionToken("");
         setIsSuspended(true);
         setUserType("NEW_USER");
       } finally {
@@ -116,11 +120,12 @@ export function useLicenseGuard() {
     machineId,
     appDomain,
     expiryDate,
+    sessionToken,
     pendingEmails,
     rawSheetData,
     initialTotalCount,
     isCampaignStarted,
     lastBatchMessage,
-    setIsSuspended, // अगर बाहर से भी स्टेट बदलनी हो
+    setIsSuspended,
   };
 }

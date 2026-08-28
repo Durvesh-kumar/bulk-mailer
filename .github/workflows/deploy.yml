@@ -14,6 +14,7 @@ on:
           - manish
           - amit
           - test
+          - khushi
 
 jobs:
   # -------------------------------------------------------------
@@ -205,4 +206,43 @@ jobs:
             --token=${{ secrets.MANISH_VERCEL_TOKEN }} \
             --scope=${{ secrets.MANISH_VERCEL_ORG_ID }} \
             --name=inboxsend-test \
+            --yes
+  
+    # -------------------------------------------------------------
+  # 2. DEPLOY TO PERSONAL VERCEL (सिर्फ तभी चलेगा जब बिल्ड पास होगा)
+  # -------------------------------------------------------------
+  deploy-khushi:
+    name: Deploy to Khushi Account
+    needs: [build-check]
+    if: ${{ github.event.inputs.target_account == 'khushi' || github.event.inputs.target_account == 'all' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Inject Secure Environment Variables
+        run: |
+          cat <<EOF > .env.production
+          NODE_ENV=production
+          ENABLE_DEVICE_LOCK=${{ secrets.ENABLE_DEVICE_LOCK }}
+          ADMIN_SECRET_KEY=${{ secrets.ADMIN_SECRET_KEY }}
+          MONGODB_URI=${{ secrets.MONGODB_URI }}
+          MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
+          DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
+          EOF
+
+      - name: Deploy to Khushi Vercel
+        run: |
+          vercel --prod \
+            --token=${{ secrets.PERSONAL_VERCEL_TOKEN }} \
+            --scope=${{ secrets.PERSONAL_VERCEL_ORG_ID }} \
+            --name=inboxsend-khushi \
             --yes
