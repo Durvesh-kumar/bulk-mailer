@@ -3,7 +3,11 @@
 
 import { useState, useEffect, useRef } from "react";
 import { SESSION_TOKEN_KEY } from "@/types/vault";
-import { syncTimestampsToDatabase } from "@/utils/cooldown";
+import {
+  isSenderInCooldown,
+  markSenderLotCompleted,
+  syncTimestampsToDatabase,
+} from "@/utils/cooldown";
 
 export interface AccountNode {
   _id?: string;
@@ -53,7 +57,7 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
   const [logs, setLogs] = useState<string[]>([]);
   
   const [intervalSeconds, setIntervalSeconds] = useState<number>(5);
-  const [lotSizePerAccount, setLotSizePerAccount] = useState<number>(1);
+  const [lotSizePerAccount, setLotSizePerAccount] = useState<number>(5);
 
   const [stats, setStats] = useState<WarmupStats>({
     totalProcessed: 0,
@@ -65,15 +69,19 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
   const isRunningRef = useRef(isRunning);
   const activePoolRef = useRef<AccountNode[]>([]);
   const receiversRef = useRef<AccountNode[]>([]);
+  const senderSentCountRef = useRef<Record<string, number>>({});
   const senderProcessedTimesRef = useRef<Record<string, string>>({});
   const intervalSecRef = useRef(intervalSeconds);
+  const lotSizeRef = useRef(lotSizePerAccount);
+  const currentSenderIdxRef = useRef<number>(0);
   const currentReceiverIdxRef = useRef<number>(0);
 
   useEffect(() => { isRunningRef.current = isRunning; }, [isRunning]);
   useEffect(() => { receiversRef.current = allReceivers; }, [allReceivers]);
   useEffect(() => { intervalSecRef.current = intervalSeconds; }, [intervalSeconds]);
+  useEffect(() => { lotSizeRef.current = lotSizePerAccount; }, [lotSizePerAccount]);
 
-  // 1. Initial Load
+  // 1. Initial Load (केवल एक बार DB से लाएगा)
   useEffect(() => {
     if (!machineId) return;
 
@@ -104,11 +112,17 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         setAllVaultAccounts(cleanSenders);
         setAllReceivers(cleanReceivers);
 
-        // पूरी सेंडर लिस्ट को एक्टिव क्यू में डालें
-        activePoolRef.current = [...cleanSenders];
+        const readySenders = cleanSenders.filter((s) => !isSenderInCooldown(s.email, s.lastSentAt));
+        activePoolRef.current = readySenders;
+
+        // काउंट रीसेट
+        senderSentCountRef.current = {};
+        readySenders.forEach((s) => {
+          senderSentCountRef.current[s.email.toLowerCase().trim()] = 0;
+        });
 
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] 🌐 Network Connected: ${cleanSenders.length} Senders in Queue | ${cleanReceivers.length} Peer Receivers.`,
+          `[${new Date().toLocaleTimeString()}] 🌐 Network Connected: ${cleanSenders.length} Senders (${readySenders.length} Ready in Queue) | ${cleanReceivers.length} Peer Receivers.`,
           ...prev,
         ]);
       } catch (err: any) {
@@ -121,22 +135,32 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
     loadNetworkNodes();
   }, [machineId, directSessionToken]);
 
-  // 2. FIFO Queue Consumer Loop (मेल प्रोसेस होते ही तुरंत कतार से बाहर)
+  // 2. Core Round-Robin & Lot Size Eviction Loop
   useEffect(() => {
     if (!isRunning) return;
 
     let timeoutId: NodeJS.Timeout | null = null;
 
-    const processNextInQueue = async () => {
+    if (activePoolRef.current.length === 0) {
+      const ready = allVaultAccounts.filter((s) => !isSenderInCooldown(s.email, s.lastSentAt));
+      activePoolRef.current = ready;
+      senderSentCountRef.current = {};
+      ready.forEach((s) => {
+        senderSentCountRef.current[s.email.toLowerCase().trim()] = 0;
+      });
+    }
+
+    const processNextRobinStep = async () => {
       if (!isRunningRef.current) return;
 
       const currentPool = activePoolRef.current;
       const currentReceivers = receiversRef.current;
+      const targetLot = lotSizeRef.current;
 
-      // 🛑 जब क्यू पूरी खाली हो जाए (Zero Remaining)
-      if (currentPool.length === 0) {
+      // 🛑 जब Queue पूरी तरह खाली हो जाए
+      if (currentPool.length === 0 || currentReceivers.length === 0) {
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] 🏁 QUEUE FINISHED: All accounts processed and evicted. Auto-Stopped.`,
+          `[${new Date().toLocaleTimeString()}] 🎉 Target Completed! All accounts finished their lot (${targetLot} emails each) and evicted. Warm-up Stopped.`,
           ...prev,
         ]);
         setIsRunning(false);
@@ -146,19 +170,25 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         return;
       }
 
-      // कतार का पहला सेंडर निकालें (FIFO)
-      const activeSender = currentPool[0];
+      // राउंड रॉबिन से सेंडर चुनें
+      const senderIdx = currentSenderIdxRef.current % currentPool.length;
+      const activeSender = currentPool[senderIdx];
       const activeEmail = activeSender.email.toLowerCase().trim();
 
-      // पासवर्ड न होने पर तुरंत बाहर निकालें ताकि लूप न अटके
+      setStats((prev) => ({
+        ...prev,
+        currentSenderIndex: currentSenderIdxRef.current,
+      }));
+
+      // पासवर्ड न होने पर कतार से बाहर करें
       if (!activeSender.appPassword) {
-        activePoolRef.current = currentPool.slice(1);
-        setAllVaultAccounts([...activePoolRef.current]);
+        activePoolRef.current = currentPool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
+        setAllVaultAccounts((prev) => prev.filter((a) => a.email.toLowerCase().trim() !== activeEmail));
         setLogs((prev) => [
           `[${new Date().toLocaleTimeString()}] ⚠️ Password missing for ${activeSender.email}. Removed from Queue.`,
           ...prev.slice(0, 49),
         ]);
-        timeoutId = setTimeout(processNextInQueue, 1000);
+        timeoutId = setTimeout(processNextRobinStep, 1000);
         return;
       }
 
@@ -167,10 +197,15 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         (r) => r.email.toLowerCase().trim() !== activeEmail
       );
 
-      const activeReceiver =
-        validReceivers.length > 0
-          ? validReceivers[currentReceiverIdxRef.current % validReceivers.length]
-          : currentReceivers[0];
+      if (validReceivers.length === 0) {
+        setLogs((prev) => [`[${new Date().toLocaleTimeString()}] ⚠️ No peer receiver for ${activeSender.email}`, ...prev]);
+        currentSenderIdxRef.current += 1;
+        timeoutId = setTimeout(processNextRobinStep, 2000);
+        return;
+      }
+
+      const receiverIdx = currentReceiverIdxRef.current % validReceivers.length;
+      const activeReceiver = validReceivers[receiverIdx];
 
       const effectiveToken =
         directSessionToken ||
@@ -198,12 +233,9 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
 
         const data = await res.json();
 
-        // 🎯 मेल सफल हो या फ़ेल — इसे तुरंत Queue से बाहर (Evict/Shift) निकालें
-        const updatedPool = currentPool.slice(1);
-        activePoolRef.current = updatedPool;
-        setAllVaultAccounts([...updatedPool]); // UI लिस्ट से भी तुरंत हटेगा
-
         const nowIso = new Date().toISOString();
+        const currentSent = (senderSentCountRef.current[activeEmail] || 0) + 1;
+        senderSentCountRef.current[activeEmail] = currentSent;
         senderProcessedTimesRef.current[activeEmail] = nowIso;
 
         if (res.ok && (data.success || data.status === "SUCCESS")) {
@@ -214,49 +246,71 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
           }));
 
           setLogs((prev) => [
-            `[${new Date().toLocaleTimeString()}] 🚀 [Remaining: ${updatedPool.length}] "${activeSender.senderName || "Sender"}" <${activeSender.email}> ➔ ${activeReceiver.email} (Evicted)`,
+            `[${new Date().toLocaleTimeString()}] 🚀 [Sent: ${currentSent}/${targetLot}] "${activeSender.senderName || "Sender"}" <${activeSender.email}> ➔ ${activeReceiver.email}`,
             ...prev.slice(0, 49),
           ]);
+
+          // 🎯 केवल लॉट साइज़ पूरा होने पर ही कतार से बाहर (Evict) होगा
+          if (currentSent >= targetLot) {
+            markSenderLotCompleted(activeEmail);
+            activePoolRef.current = activePoolRef.current.filter(
+              (s) => s.email.toLowerCase().trim() !== activeEmail
+            );
+
+            setAllVaultAccounts((prev) =>
+              prev.map((acc) =>
+                acc.email.toLowerCase().trim() === activeEmail
+                  ? { ...acc, lastSentAt: nowIso }
+                  : acc
+              )
+            );
+
+            setLogs((prev) => [
+              `[${new Date().toLocaleTimeString()}] 🏁 [Lot Done: ${currentSent}/${targetLot}] ${activeSender.email} completed quota & evicted from active queue.`,
+              ...prev.slice(0, 49),
+            ]);
+          } else {
+            // लॉट पूरा नहीं हुआ तो अगले सेंडर पर जाएँ
+            currentSenderIdxRef.current += 1;
+          }
         } else {
           setStats((prev) => ({
             ...prev,
             totalFailed: prev.totalFailed + 1,
           }));
+          currentSenderIdxRef.current += 1;
 
           setLogs((prev) => [
-            `[${new Date().toLocaleTimeString()}] ❌ [Remaining: ${updatedPool.length}] Failed: ${activeSender.email} ➔ ${data.error || "Delivery Error"} (Evicted)`,
+            `[${new Date().toLocaleTimeString()}] ❌ Failed: ${activeSender.email} ➔ ${data.error || "Delivery Error"}`,
             ...prev.slice(0, 49),
           ]);
         }
 
         currentReceiverIdxRef.current += 1;
       } catch (err: any) {
-        // नेटवर्क एरर होने पर भी क्यू से बाहर निकालें
-        const updatedPool = currentPool.slice(1);
-        activePoolRef.current = updatedPool;
-        setAllVaultAccounts([...updatedPool]);
-
         setStats((prev) => ({
           ...prev,
           totalFailed: prev.totalFailed + 1,
         }));
+        currentSenderIdxRef.current += 1;
+        currentReceiverIdxRef.current += 1;
 
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] ❌ Network Drop for ${activeSender.email} (Evicted)`,
+          `[${new Date().toLocaleTimeString()}] ❌ Network Error for ${activeSender.email}`,
           ...prev.slice(0, 49),
         ]);
       }
 
       const baseMs = (intervalSecRef.current || 5) * 1000;
-      const jitterMs = Math.floor(Math.random() * 1500) + 500;
+      const jitterMs = Math.floor(Math.random() * 2000) + 1000;
       const totalWaitMs = baseMs + jitterMs;
 
       if (isRunningRef.current) {
-        timeoutId = setTimeout(processNextInQueue, totalWaitMs);
+        timeoutId = setTimeout(processNextRobinStep, totalWaitMs);
       }
     };
 
-    processNextInQueue();
+    processNextRobinStep();
 
     return () => {
       if (timeoutId) clearTimeout(timeoutId);
