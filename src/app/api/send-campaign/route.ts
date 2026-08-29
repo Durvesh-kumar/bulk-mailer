@@ -97,7 +97,7 @@ export async function POST(req: Request) {
           user: cleanSender,
           pass: cleanPassword,
         },
-        name: "mail.google.com",
+        // name: "mail.google.com",
       });
     };
 

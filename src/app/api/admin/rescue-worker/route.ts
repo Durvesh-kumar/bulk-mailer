@@ -280,7 +280,7 @@ export async function POST(req: NextRequest) {
         port: 465,
         secure: true,
         auth: { user: cleanEmail, pass: receiverPass },
-        name: "mail.google.com",
+        // name: "mail.google.com",
       });
 
       for (let i = 0; i < pendingReplies.length; i++) {
