@@ -6,6 +6,8 @@ import { decryptPassword } from "@/lib/encryption";
 import { getRandomWarmupMessage } from "@/lib/warmupTopics";
 import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
 
+const WARMUP_TAG = "[WU-VERIFIED-NODE]";
+
 const pickRandom = (arr: string[] | undefined, fallback: string): string => {
   if (!arr || arr.length === 0) return fallback;
   return arr[Math.floor(Math.random() * arr.length)];
@@ -14,8 +16,6 @@ const pickRandom = (arr: string[] | undefined, fallback: string): string => {
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  let transporter: nodemailer.Transporter | null = null;
-
   try {
     const body = await req.json();
     const {
@@ -31,14 +31,6 @@ export async function POST(req: Request) {
     const sessionToken = req.headers.get("x-session-token") || bodySessionToken || null;
     const rawPass = String(encryptedPassword || appPassword || "").trim();
 
-    console.log("🔍 [Warmup-Worker Step 1] Inbound Request:", {
-      machineId: machineId || "MISSING",
-      senderEmail: senderEmail || "MISSING",
-      receiverEmail: receiverEmail || "MISSING",
-      hasPassword: Boolean(rawPass),
-      tokenPresent: Boolean(sessionToken),
-    });
-
     if (!machineId || !senderEmail || !receiverEmail || !rawPass) {
       return NextResponse.json(
         { error: "Missing required parameters: machineId, senderEmail, receiverEmail, or Password." },
@@ -49,9 +41,9 @@ export async function POST(req: Request) {
     const hostHeader =
       req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost";
 
+    // 1. लाइसेंस और सेशन वेरिफिकेशन
     const guard = await verifyLicenseAndDevice(hostHeader, machineId, sessionToken);
     if (!guard.ok) {
-      console.error("❌ [Warmup-Worker Step 2] Guard Rejected:", guard.error);
       return NextResponse.json(
         {
           error: guard.error || "License verification failed.",
@@ -63,9 +55,9 @@ export async function POST(req: Request) {
 
     const cleanSender = senderEmail.toLowerCase().trim();
     const cleanReceiver = receiverEmail.toLowerCase().trim();
-    const cleanHeaderName = (senderName || "Colleague").trim();
+    const cleanHeaderName = String(senderName || "").trim();
 
-    // 🔐 पासवर्ड डिक्रिप्शन
+    // 🔐 2. पासवर्ड डिक्रिप्शन
     let cleanPassword = rawPass.replace(/\s+/g, "");
     if (rawPass.includes(":") && rawPass.length > 20) {
       try {
@@ -75,30 +67,19 @@ export async function POST(req: Request) {
       }
     }
 
-    // 🚀 Pure Native Gmail SMTP Connection
-    transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      auth: {
-        user: cleanSender,
-        pass: cleanPassword,
-      },
-    });
-
-    try {
-      await transporter.verify();
-    } catch (authErr: any) {
-      console.error(`❌ [Warmup-Worker Step 3] SMTP Auth Error for ${cleanSender}:`, authErr.message);
-      const isAuthError = authErr.code === "EAUTH" || authErr.responseCode === 535;
-      return NextResponse.json(
-        {
-          error: `Authentication failed for ${cleanSender}. Check App Password.`,
-          accountErrorType: isAuthError ? "AUTH_FAILED" : "CONNECTION_FAILED",
+    // 🚀 3. Fresh Single-Use Transport Factory
+    const createFreshTransport = () => {
+      return nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: {
+          user: cleanSender,
+          pass: cleanPassword,
         },
-        { status: 400 }
-      );
-    }
+        name: "mail.google.com",
+      });
+    };
 
     const { subject, body: rawTopicBody } = getRandomWarmupMessage();
 
@@ -116,18 +97,36 @@ export async function POST(req: Request) {
 
     const formattedPlainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanBody}\n\n${randomSignOff}\n\n${cleanHeaderName}`;
 
-    // 📨 Native Headers Dispatch
-    const info = await transporter.sendMail({
-      from: `"${cleanHeaderName}" <${cleanSender}>`,
-      to: cleanReceiver,
-      subject: (subject || "Connecting regarding our conversation").trim(),
-      text: formattedPlainText,
-    });
+    const baseSubject = (subject || "Connecting regarding our conversation").trim();
+    const finalSubjectWithTag = baseSubject.includes(WARMUP_TAG)
+      ? baseSubject
+      : `${baseSubject} ${WARMUP_TAG}`;
 
-    console.log(`✅ [Warmup-Worker Step 4] Dispatched OK: Message-ID ${info.messageId}`);
+    // 🔌 नया फ्रेश कनेक्शन ओपन करें
+    const activeTransporter = createFreshTransport();
+    let info: nodemailer.SentMessageInfo;
 
-    transporter.close();
-    transporter = null;
+    try {
+      // 📨 100% ओरिजिनल Google MIME हेडर डिस्पैच
+      info = await activeTransporter.sendMail({
+        from: cleanHeaderName ? `"${cleanHeaderName}" <${cleanSender}>` : cleanSender,
+        to: cleanReceiver,
+        subject: finalSubjectWithTag,
+        text: formattedPlainText,
+      });
+    } catch (err: any) {
+      const isAuthError = err.code === "EAUTH" || err.responseCode === 535;
+      return NextResponse.json(
+        {
+          error: `Delivery failed for ${cleanSender}: ${err.message}`,
+          accountErrorType: isAuthError ? "AUTH_FAILED" : "CONNECTION_FAILED",
+        },
+        { status: 400 }
+      );
+    } finally {
+      // 🔒 मेल जाते ही कनेक्शन तुरंत पूरी तरह क्लोज़ (Socket Terminated)
+      activeTransporter.close();
+    }
 
     return NextResponse.json({
       success: true,
@@ -138,13 +137,6 @@ export async function POST(req: Request) {
       timestamp: new Date().toISOString(),
     });
   } catch (error: any) {
-    if (transporter) {
-      try {
-        transporter.close();
-      } catch (_) {}
-    }
-
-    console.error("POST /api/silent-warmup Critical Error:", error);
     return NextResponse.json(
       { error: error.message || "Failed to dispatch silent warmup mail." },
       { status: 500 }

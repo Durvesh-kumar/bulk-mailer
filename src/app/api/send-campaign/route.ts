@@ -1,3 +1,4 @@
+// src/app/api/send-campaign/route.ts
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
@@ -17,8 +18,6 @@ const pickRandom = (arr: string[]): string => {
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
-  let transporter: nodemailer.Transporter | null = null;
-
   try {
     const body = await req.json();
     const {
@@ -31,9 +30,10 @@ export async function POST(req: Request) {
       customSignoffName,
       machineId,
       sessionToken,
-      accountAgeMode = "AGED",
+      accountAgeMode,
     } = body;
 
+    // 1. इनपुट वैलिडेशन
     if (!senderEmail || !appPassword || !recipients?.length || !subject || !template) {
       return NextResponse.json(
         { error: "Please fill in all required fields (Sender Email, App Password, Leads, Subject, Body)." },
@@ -41,17 +41,13 @@ export async function POST(req: Request) {
       );
     }
 
-    // 🔒 @/config/accountModes से मोड कॉन्फ़िगरेशन लोड करना
-    const selectedMode: AccountAgeMode = (
-      MODE_CONFIGS[accountAgeMode as AccountAgeMode] ? accountAgeMode : "AGED"
-    ) as AccountAgeMode;
-    const rule = MODE_CONFIGS[selectedMode];
+    // 🔒 सीधे आपके MODE_CONFIGS से रूल उठाएगा
+    const rule = MODE_CONFIGS[accountAgeMode as AccountAgeMode];
 
-    // सुरक्षा नियम: अगर यूजर मोड लिमिट से ज्यादा लीड्स भेजता है
-    if (recipients.length > rule.maxLot) {
+    if (rule && recipients.length > rule.maxLot) {
       return NextResponse.json(
         {
-          error: `Safety Limit Exceeded: For ${selectedMode} accounts, maximum allowed emails per batch is ${rule.maxLot}. You submitted ${recipients.length}.`,
+          error: `Safety Limit Exceeded: Max allowed emails per batch is ${rule.maxLot}. You submitted ${recipients.length}.`,
         },
         { status: 400 }
       );
@@ -60,6 +56,7 @@ export async function POST(req: Request) {
     const hostHeader =
       req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost";
 
+    // 2. लाइसेंस व सेशन वेरिफिकेशन
     const guard = await verifyLicenseAndDevice(hostHeader, machineId, sessionToken);
     if (!guard.ok) {
       return NextResponse.json(
@@ -72,11 +69,10 @@ export async function POST(req: Request) {
     }
 
     const cleanSender = senderEmail.trim().toLowerCase();
-
-    // 🛡️ Smart Dual Password Handler (Direct 16-char or Encrypted Vault ciphertext)
     const rawPass = String(appPassword).trim();
     let cleanPassword = rawPass.replace(/\s+/g, "");
 
+    // 🔐 पासवर्ड डिक्रिप्शन
     if (rawPass.includes(":") && rawPass.length > 20) {
       try {
         cleanPassword = decryptPassword(rawPass).replace(/\s+/g, "");
@@ -85,28 +81,30 @@ export async function POST(req: Request) {
       }
     }
 
-    const cleanHeaderName = (senderName || "Colleague").trim();
+    // 🎯 सेंडर और साइन-ऑफ नाम लॉजिक
+    const cleanHeaderName = String(senderName || "").trim();
+    const finalSignoffName = (customSignoffName && customSignoffName.trim().length > 0)
+      ? customSignoffName.trim()
+      : cleanHeaderName;
 
-    // 🔒 साइन-ऑफ नाम लॉजिक
-    const finalSignoffName =
-      customSignoffName && customSignoffName.trim().length > 0
-        ? customSignoffName.trim()
-        : cleanHeaderName;
+    // 🚀 SMTP फ़ैक्ट्री
+    const getFreshTransporter = () => {
+      return nodemailer.createTransport({
+        host: "smtp.gmail.com",
+        port: 465,
+        secure: true,
+        auth: {
+          user: cleanSender,
+          pass: cleanPassword,
+        },
+        name: "mail.google.com",
+      });
+    };
 
-    // 🚀 NO POOL - Pure Direct Client Signature (100% Inbox Placement)
-    transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      auth: {
-        user: cleanSender,
-        pass: cleanPassword,
-      },
-      name: "mail.google.com",
-    });
-
+    // शुरुआती क्रेडेंशियल टेस्ट और कनेक्शन क्लोज़
+    const initialTest = getFreshTransporter();
     try {
-      await transporter.verify();
+      await initialTest.verify();
     } catch (authErr: any) {
       const isAuthError = authErr.code === "EAUTH" || authErr.responseCode === 535;
       return NextResponse.json(
@@ -117,11 +115,13 @@ export async function POST(req: Request) {
           report: recipients.map((email: string) => ({
             email,
             status: "FAILED",
-            error: "Authentication / Connection Failed",
+            error: "Authentication Failed",
           })),
         },
         { status: 400 }
       );
+    } finally {
+      initialTest.close();
     }
 
     const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
@@ -137,33 +137,29 @@ export async function POST(req: Request) {
       )
       .trim();
 
+    // 📨 ईमेल डिस्पैच लूप
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
 
-      if (isQuotaHit) {
-        break;
-      }
+      if (isQuotaHit) break;
 
       const randomGreeting = pickRandom(GREETINGS);
       const randomOpener = pickRandom(OPENERS);
       const randomSignOff = pickRandom(SIGN_OFFS);
 
-      // 💡 100% असली ह्यूमन प्लेन-टेक्स्ट स्ट्रक्चर
       const plainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanUserBody}\n\n${randomSignOff}\n\n${finalSignoffName}`;
 
+      const currentTransporter = getFreshTransporter();
+
       try {
-        await transporter.sendMail({
-          from: `"${cleanHeaderName}" <${cleanSender}>`,
+        await currentTransporter.sendMail({
+          from: cleanHeaderName ? `"${cleanHeaderName}" <${cleanSender}>` : cleanSender,
           to: recipientEmail,
           subject: subject.trim(),
           text: plainText,
         });
 
         logs.push({ email: recipientEmail, status: "SUCCESS" });
-
-        if (i < recipients.length - 1) {
-          await sleepRandom(rule.minDelay, rule.maxDelay);
-        }
       } catch (err: any) {
         const errMessage = err.message || "";
         const isQuotaErr =
@@ -179,25 +175,27 @@ export async function POST(req: Request) {
 
         if (isQuotaErr) {
           isQuotaHit = true;
-          break;
         }
+      } finally {
+        currentTransporter.close();
+      }
+
+      if (isQuotaHit) break;
+
+      // ⏱️ सीधा आपके MODE_CONFIGS के minDelay और maxDelay से चलेगा
+      if (rule && i < recipients.length - 1) {
+        await sleepRandom(rule.minDelay, rule.maxDelay);
       }
     }
-
-    transporter.close();
-    transporter = null;
 
     return NextResponse.json({
       report: logs,
       sessionToken: guard.sessionToken,
-      modeApplied: selectedMode,
+      modeApplied: accountAgeMode,
       accountError: isQuotaHit,
       accountErrorType: isQuotaHit ? "QUOTA_EXCEEDED" : null,
     });
   } catch (error: any) {
-    if (transporter) {
-      try { transporter.close(); } catch (_) {}
-    }
     return NextResponse.json(
       { error: error.message || "Internal server error." },
       { status: 500 }

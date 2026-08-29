@@ -330,6 +330,19 @@ export default function AdminDashboard() {
               <span>⚡</span> Warm-Up Engine
             </Link>
 
+            {/* 🛡️ नया Spam Sentinel बटन (क्लिक पर की सिंक पक्की करेगा) */}
+            <Link
+              href="/admin/rescue"
+              onClick={() => {
+                if (adminKey && typeof window !== "undefined") {
+                  sessionStorage.setItem("admin_session_key", adminKey.trim());
+                }
+              }}
+              className="text-xs bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 px-3 py-1.5 rounded-xl transition font-semibold flex items-center gap-1.5 shadow-sm cursor-pointer"
+            >
+              <span>🛡️</span> Spam Sentinel
+            </Link>
+
             <button
               onClick={() => fetchLicenses(adminKey)}
               className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 px-3 py-1.5 rounded-xl transition cursor-pointer"

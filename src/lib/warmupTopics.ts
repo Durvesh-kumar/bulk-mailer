@@ -1,31 +1,81 @@
-export const WARMUP_SUBJECTS = [
-  "Quick sync on project timeline",
-  "Notes from our earlier discussion",
-  "Regarding next week schedule",
-  "Updated document review",
-  "Feedback on recent deliverables",
-  "Quick question about the presentation",
-  "Follow-up on the design proposal",
-  "Meeting notes and next steps",
-  "Checking in on the status update",
+// src/lib/warmupTopics.ts
+
+const SUBJECT_PREFIXES = [
+  "Quick update on",
+  "Notes regarding",
+  "Follow-up on",
+  "Action items from",
+  "Brief sync regarding",
+  "Thoughts on",
+  "Reviewing",
+  "Discussion points for",
+  "Status update on",
+  "Regarding our plan for",
+  "Summary of",
+  "Details about",
 ];
 
-const WARMUP_BODIES = [
-  "I have reviewed the points we discussed earlier and everything looks on track. Let me know if you need any adjustments before we proceed.",
-  "Just checking in to confirm our agenda for tomorrow. Please find a moment to look over the details whenever convenient.",
-  "Thanks for sharing the update earlier. I will go through the files and get back to you with my thoughts by the end of the day.",
-  "I went through the shared draft. Looks solid overall. Just have a couple of minor suggestions which I will send over shortly.",
-  "Did you get a chance to see the latest version? The structure looks much cleaner now. Let me know what you think.",
-  "Thanks for sending that over. I agree with the suggested approach. Let us proceed accordingly.",
-  "Let me know when you are free for a quick 5-minute sync regarding the roadmap.",
+const SUBJECT_TOPICS = [
+  "project roadmap",
+  "upcoming sprint",
+  "client deliverables",
+  "architecture design",
+  "weekly schedule",
+  "quarterly objectives",
+  "strategy deck",
+  "team coordination",
+  "milestone checklist",
+  "production sync",
+  "deployment pipeline",
+  "workflow optimization",
+  "performance review",
 ];
 
-export function getRandomWarmupMessage() {
-  const subject = WARMUP_SUBJECTS[Math.floor(Math.random() * WARMUP_SUBJECTS.length)];
-  const body = WARMUP_BODIES[Math.floor(Math.random() * WARMUP_BODIES.length)];
+const INTROS = [
+  "Hope you are having a productive week.",
+  "Just touching base regarding our latest discussion.",
+  "Wanted to quickly drop this note for your review.",
+  "Following up on our earlier conversation.",
+  "Hope everything is going smoothly on your end.",
+  "Reaching out to keep you in the loop on this.",
+];
+
+const BODIES = [
+  "I went through the documentation and the overall flow looks solid. A few minor adjustments might be needed later, but nothing urgent.",
+  "Everything seems aligned with what we planned. Let me know if you want to make any tweaks before we proceed further.",
+  "I have verified the primary points from my side. We can go ahead with the next phase whenever you're ready.",
+  "The current timeline looks realistic. I'll make sure the deliverables are prepped by the end of the week.",
+  "Just reviewed the latest update. The structure is much clearer now, and the team should find it easy to follow.",
+  "Thanks for putting this together. The initial feedback looks positive, and we can discuss additional details in our next sync.",
+];
+
+const CALL_TO_ACTIONS = [
+  "Let me know if you have any questions or suggestions.",
+  "Feel free to share your thoughts whenever you get a minute.",
+  "No rush on this—take a look whenever convenient.",
+  "Looking forward to hearing your perspective on this.",
+  "Keep me posted if anything changes from your side.",
+];
+
+export function getRandomWarmupMessage(tag: string = "[WU-VERIFIED]") {
+  const prefix = SUBJECT_PREFIXES[Math.floor(Math.random() * SUBJECT_PREFIXES.length)];
+  const topic = SUBJECT_TOPICS[Math.floor(Math.random() * SUBJECT_TOPICS.length)];
+  
+  // रैंडम सब्जेक्ट: "Notes regarding client deliverables [WU-VERIFIED]"
+  const subject = `${prefix} ${topic} ${tag}`;
+
+  const intro = INTROS[Math.floor(Math.random() * INTROS.length)];
+  const body = BODIES[Math.floor(Math.random() * BODIES.length)];
+  const cta = CALL_TO_ACTIONS[Math.floor(Math.random() * CALL_TO_ACTIONS.length)];
+
+  // कंटेंट हैश को 100% यूनिक रखने के लिए रैंडम रेफरेंस ID
+  const randomRef = `Ref: #${Math.floor(100000 + Math.random() * 900000)}`;
 
   return {
     subject,
+    intro,
     body,
+    cta,
+    randomRef,
   };
 }

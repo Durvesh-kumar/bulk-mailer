@@ -31,15 +31,15 @@ function deduplicateAccounts(accounts: any[]): AccountNode[] {
   const uniqueList: AccountNode[] = [];
 
   for (const item of accounts) {
-    if (!item.email) continue;
-    const cleanEmail = item.email.toLowerCase().trim();
+    if (!item || !item.email) continue;
+    const cleanEmail = String(item.email).toLowerCase().trim();
     if (!seen.has(cleanEmail)) {
       seen.add(cleanEmail);
       uniqueList.push({
         _id: item._id,
-        senderName: item.senderName,
+        senderName: item.senderName ? String(item.senderName).trim() : "",
         email: cleanEmail,
-        appPassword: item.appPassword || item.password || item.smtpPassword,
+        appPassword: item.appPassword || item.password || item.smtpPassword || item.encryptedPassword,
         profileTier: item.profileTier,
         lastSentAt: item.lastSentAt,
         isExternalPeer: item.isExternalPeer,
@@ -81,7 +81,7 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
   useEffect(() => { intervalSecRef.current = intervalSeconds; }, [intervalSeconds]);
   useEffect(() => { lotSizeRef.current = lotSizePerAccount; }, [lotSizePerAccount]);
 
-  // 1. Initial Load (केवल एक बार DB से लाएगा)
+  // 1. Initial Load (Single Call)
   useEffect(() => {
     if (!machineId) return;
 
@@ -115,14 +115,13 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         const readySenders = cleanSenders.filter((s) => !isSenderInCooldown(s.email, s.lastSentAt));
         activePoolRef.current = readySenders;
 
-        // काउंट रीसेट
         senderSentCountRef.current = {};
         readySenders.forEach((s) => {
-          senderSentCountRef.current[s.email.toLowerCase().trim()] = 0;
+          senderSentCountRef.current[s.email] = 0;
         });
 
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] 🌐 Network Connected: ${cleanSenders.length} Senders (${readySenders.length} Ready in Queue) | ${cleanReceivers.length} Peer Receivers.`,
+          `[${new Date().toLocaleTimeString()}] 🌐 Connected: ${cleanSenders.length} Senders (${readySenders.length} Ready in Queue) | ${cleanReceivers.length} Peer Inboxes.`,
           ...prev,
         ]);
       } catch (err: any) {
@@ -135,7 +134,7 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
     loadNetworkNodes();
   }, [machineId, directSessionToken]);
 
-  // 2. Core Round-Robin & Lot Size Eviction Loop
+  // 2. Round-Robin Execution Loop
   useEffect(() => {
     if (!isRunning) return;
 
@@ -146,7 +145,7 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
       activePoolRef.current = ready;
       senderSentCountRef.current = {};
       ready.forEach((s) => {
-        senderSentCountRef.current[s.email.toLowerCase().trim()] = 0;
+        senderSentCountRef.current[s.email] = 0;
       });
     }
 
@@ -157,22 +156,25 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
       const currentReceivers = receiversRef.current;
       const targetLot = lotSizeRef.current;
 
-      // 🛑 जब Queue पूरी तरह खाली हो जाए
+      // 🛑 कतार खत्म
       if (currentPool.length === 0 || currentReceivers.length === 0) {
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] 🎉 Target Completed! All accounts finished their lot (${targetLot} emails each) and evicted. Warm-up Stopped.`,
+          `[${new Date().toLocaleTimeString()}] 🎉 Target Completed! All accounts finished their quota (${targetLot} each). Warm-up Stopped.`,
           ...prev,
         ]);
         setIsRunning(false);
         if (Object.keys(senderProcessedTimesRef.current).length > 0) {
-          await syncTimestampsToDatabase(machineId, senderProcessedTimesRef.current);
+          syncTimestampsToDatabase(machineId, senderProcessedTimesRef.current);
         }
         return;
       }
 
-      // राउंड रॉबिन से सेंडर चुनें
-      const senderIdx = currentSenderIdxRef.current % currentPool.length;
-      const activeSender = currentPool[senderIdx];
+      // सेफ़ राउंड-रॉबिन इंडेक्स
+      if (currentSenderIdxRef.current >= currentPool.length) {
+        currentSenderIdxRef.current = 0;
+      }
+
+      const activeSender = currentPool[currentSenderIdxRef.current];
       const activeEmail = activeSender.email.toLowerCase().trim();
 
       setStats((prev) => ({
@@ -180,26 +182,26 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         currentSenderIndex: currentSenderIdxRef.current,
       }));
 
-      // पासवर्ड न होने पर कतार से बाहर करें
+      // पासवर्ड मिसिंग चेक
       if (!activeSender.appPassword) {
         activePoolRef.current = currentPool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
         setAllVaultAccounts((prev) => prev.filter((a) => a.email.toLowerCase().trim() !== activeEmail));
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] ⚠️ Password missing for ${activeSender.email}. Removed from Queue.`,
+          `[${new Date().toLocaleTimeString()}] ⚠️ Password missing for ${activeSender.email}. Removed.`,
           ...prev.slice(0, 49),
         ]);
         timeoutId = setTimeout(processNextRobinStep, 1000);
         return;
       }
 
-      // सेंडर से अलग रिसीवर चुनें
+      // सेल्फ़-मेलिंग प्रिवेंशन
       const validReceivers = currentReceivers.filter(
         (r) => r.email.toLowerCase().trim() !== activeEmail
       );
 
       if (validReceivers.length === 0) {
         setLogs((prev) => [`[${new Date().toLocaleTimeString()}] ⚠️ No peer receiver for ${activeSender.email}`, ...prev]);
-        currentSenderIdxRef.current += 1;
+        currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % currentPool.length;
         timeoutId = setTimeout(processNextRobinStep, 2000);
         return;
       }
@@ -224,7 +226,7 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
             machineId,
             sessionToken: effectiveToken,
             senderEmail: activeSender.email,
-            senderName: activeSender.senderName,
+            senderName: activeSender.senderName || "",
             appPassword: activeSender.appPassword,
             encryptedPassword: activeSender.appPassword,
             receiverEmail: activeReceiver.email,
@@ -232,7 +234,6 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         });
 
         const data = await res.json();
-
         const nowIso = new Date().toISOString();
         const currentSent = (senderSentCountRef.current[activeEmail] || 0) + 1;
         senderSentCountRef.current[activeEmail] = currentSent;
@@ -245,12 +246,13 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
             rescuedCount: prev.rescuedCount + (data.rescued ? 1 : 0),
           }));
 
+          const displayName = activeSender.senderName ? `"${activeSender.senderName}" ` : "";
           setLogs((prev) => [
-            `[${new Date().toLocaleTimeString()}] 🚀 [Sent: ${currentSent}/${targetLot}] "${activeSender.senderName || "Sender"}" <${activeSender.email}> ➔ ${activeReceiver.email}`,
+            `[${new Date().toLocaleTimeString()}] 🚀 [${currentSent}/${targetLot}] ${displayName}<${activeSender.email}> ➔ ${activeReceiver.email}`,
             ...prev.slice(0, 49),
           ]);
 
-          // 🎯 केवल लॉट साइज़ पूरा होने पर ही कतार से बाहर (Evict) होगा
+          // कोटा पूरा होने पर एविक्शन
           if (currentSent >= targetLot) {
             markSenderLotCompleted(activeEmail);
             activePoolRef.current = activePoolRef.current.filter(
@@ -266,34 +268,33 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
             );
 
             setLogs((prev) => [
-              `[${new Date().toLocaleTimeString()}] 🏁 [Lot Done: ${currentSent}/${targetLot}] ${activeSender.email} completed quota & evicted from active queue.`,
+              `[${new Date().toLocaleTimeString()}] 🏁 [Done ${currentSent}/${targetLot}] ${activeSender.email} completed quota.`,
               ...prev.slice(0, 49),
             ]);
+            // इंडेक्स को वहीं रहने दें ताकि अगला आइटम प्रोसेस हो
           } else {
-            // लॉट पूरा नहीं हुआ तो अगले सेंडर पर जाएँ
-            currentSenderIdxRef.current += 1;
+            currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % activePoolRef.current.length;
           }
         } else {
           setStats((prev) => ({
             ...prev,
             totalFailed: prev.totalFailed + 1,
           }));
-          currentSenderIdxRef.current += 1;
+          currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % currentPool.length;
 
           setLogs((prev) => [
-            `[${new Date().toLocaleTimeString()}] ❌ Failed: ${activeSender.email} ➔ ${data.error || "Delivery Error"}`,
+            `[${new Date().toLocaleTimeString()}] ❌ Delivery Error [${activeSender.email}]: ${data.error || "Failed"}`,
             ...prev.slice(0, 49),
           ]);
         }
 
-        currentReceiverIdxRef.current += 1;
+        currentReceiverIdxRef.current = (currentReceiverIdxRef.current + 1) % validReceivers.length;
       } catch (err: any) {
         setStats((prev) => ({
           ...prev,
           totalFailed: prev.totalFailed + 1,
         }));
-        currentSenderIdxRef.current += 1;
-        currentReceiverIdxRef.current += 1;
+        currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % currentPool.length;
 
         setLogs((prev) => [
           `[${new Date().toLocaleTimeString()}] ❌ Network Error for ${activeSender.email}`,
@@ -301,8 +302,9 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         ]);
       }
 
-      const baseMs = (intervalSecRef.current || 5) * 1000;
-      const jitterMs = Math.floor(Math.random() * 2000) + 1000;
+      // रैंडम जिटर डिले (User Configured + 1-2s jitter)
+      const baseMs = Math.max(5, intervalSecRef.current || 5) * 1000;
+      const jitterMs = Math.floor(Math.random() * 2000) + 500;
       const totalWaitMs = baseMs + jitterMs;
 
       if (isRunningRef.current) {

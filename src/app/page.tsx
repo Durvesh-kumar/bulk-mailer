@@ -24,7 +24,6 @@ import {
 const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
 
-// ⏳ फ्रंटएंड रैंडम डिले हेल्पर (3.0s से 4.5s)
 const sleepRandomDelay = (min = 3000, max = 4500) => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,10 +35,11 @@ export default function Home() {
   const [selectedTier, setSelectedTier] = useState<ProfileTier>("YEAR_2");
   const [isVaultLoaded, setIsVaultLoaded] = useState(false);
 
-  // Active Sender State (Password बैकग्राउंड में रहेगा, UI में नहीं दिखेगा)
+  // Active Sender State
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
 
   const [inMemorySenders, setInMemorySenders] = useState<SmtpAccount[]>([]);
   const [currentSenderIndex, setCurrentSenderIndex] = useState<number>(0);
@@ -209,7 +209,12 @@ export default function Home() {
     }
 
     if (!senderEmail || !senderName) {
-      alert("Sender details missing! Please select an Age Profile from Vault.");
+      alert("Please enter Sender Email and Display Name!");
+      return;
+    }
+
+    if (!isVaultLoaded && !appPassword.trim()) {
+      alert("Please enter the 16-digit Gmail App Password for this manual account!");
       return;
     }
 
@@ -318,14 +323,13 @@ export default function Home() {
     const currentSenderCurrentSent = senderSentCountRef.current[activeEmail.toLowerCase()] || 0;
     const remainingLotForThisSender = Math.max(1, targetLotSize - currentSenderCurrentSent);
 
-    // 🎯 Round-Robin (CONTINUOUS & EVERY_N) = 1 Email Batch | Single Sender = Full Remaining Chunks
     const actualBatchLimit = isSingleSenderFullLot 
       ? Math.min(remainingLotForThisSender, currentQueue.length)
       : 1;
 
     const batchToSend = currentQueue.slice(0, actualBatchLimit);
     const activeChunkSize = isSingleSenderFullLot 
-      ? (MODE_CONFIGS[mode]?.chunkSize || 8) 
+      ? (MODE_CONFIGS[mode]?.chunkSize || 6) 
       : 1;
 
     let batchProcessedCount = 0;
@@ -375,7 +379,7 @@ export default function Home() {
           setInMemorySenders(remainingSenders);
           setSenderEmail(nextSender.email);
           setAppPassword(nextSender.appPassword);
-          setSenderName(nextSender.senderName || "Colleague");
+          setSenderName(nextSender.senderName || "Ruby");
 
           const unhandledQueue = currentQueue.slice(batchProcessedCount);
           await consumeQueueBatch(
@@ -389,7 +393,7 @@ export default function Home() {
             mode,
             nextSender.email,
             nextSender.appPassword,
-            nextSender.senderName || "Colleague"
+            nextSender.senderName || "Ruby"
           );
           return;
         }
@@ -459,7 +463,6 @@ export default function Home() {
         let nextIdx = senderIdx;
         let senderJustCompletedLot = false;
 
-        // लॉट साइज पूरा होने पर सेंडर को पूल से बाहर निकालना (24h Cooldown)
         if (updatedSenderSent >= targetLotSize) {
           senderJustCompletedLot = true;
           markSenderLotCompleted(activeEmail);
@@ -491,7 +494,7 @@ export default function Home() {
         setCurrentSenderIndex(nextIdx % activePool.length);
         setSenderEmail(nextSender.email);
         setAppPassword(nextSender.appPassword);
-        setSenderName(nextSender.senderName || "Colleague");
+        setSenderName(nextSender.senderName || "Ruby");
 
         let shouldPause = false;
         let pauseMessage = "";
@@ -516,7 +519,6 @@ export default function Home() {
           return;
         }
 
-        // ⏱️ केवल Round-Robin (CONTINUOUS / EVERY_N) में 3s से 4.5s का फ्रंटएंड डिले
         if (rotationModeRef.current === "CONTINUOUS" || rotationModeRef.current === "EVERY_N_SENDERS") {
           await sleepRandomDelay(3000, 4500);
         } else {
@@ -535,7 +537,7 @@ export default function Home() {
             mode,
             nextSender.email,
             nextSender.appPassword,
-            nextSender.senderName || "Colleague"
+            nextSender.senderName || "Ruby"
           );
         }
       }
@@ -578,7 +580,7 @@ export default function Home() {
       accountAgeMode,
       currentSender.email,
       currentSender.appPassword,
-      currentSender.senderName || "Colleague"
+      currentSender.senderName || "Ruby"
     );
   };
 
@@ -764,9 +766,13 @@ export default function Home() {
                   <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
                     <span>📅</span> 1. Select Age Group:
                   </span>
-                  {isVaultLoaded && (
+                  {isVaultLoaded ? (
                     <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
-                      ✓ {inMemorySenders.length} Loaded (24h Cooldown Filtered)
+                      ✓ {inMemorySenders.length} Vault Accounts Active
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-amber-400 font-mono bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-md">
+                      Manual Account Mode
                     </span>
                   )}
                 </div>
@@ -794,18 +800,18 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* Sender Details (Clean UI Without Password Box) */}
+              {/* 🔑 Sender Details: वॉल्ट लोड होने पर पासवर्ड सेक्शन ऑटोमैटिक छिप जाएगा */}
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2.5 shadow-lg">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div className={`grid grid-cols-1 ${!isVaultLoaded ? "sm:grid-cols-3" : "sm:grid-cols-2"} gap-2`}>
                   <InputField
-                    label="Active Sender Gmail"
+                    label="Sender Gmail"
                     type="email"
                     required
                     disabled={loading}
                     value={senderEmail}
                     onChange={(e) => setSenderEmail(e.target.value)}
                     placeholder="account1@gmail.com"
-                    className="font-mono"
+                    className="font-mono text-xs"
                   />
 
                   <InputField
@@ -815,8 +821,34 @@ export default function Home() {
                     disabled={loading}
                     value={senderName}
                     onChange={(e) => setSenderName(e.target.value)}
-                    placeholder="e.g. Sales Lead"
+                    placeholder="e.g. Ruby / Alex"
+                    className="text-xs"
                   />
+
+                  {/* 🔒 केवल मैन्युअल मोड में पासवर्ड फ़ील्ड दिखेगा */}
+                  {!isVaultLoaded && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-bold text-slate-300">16-Digit App Password</label>
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="text-[9px] text-indigo-400 hover:text-indigo-300 font-mono cursor-pointer"
+                        >
+                          {showPassword ? "Hide" : "Show"}
+                        </button>
+                      </div>
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        required
+                        disabled={loading}
+                        value={appPassword}
+                        onChange={(e) => setAppPassword(e.target.value)}
+                        placeholder="abcd efgh ijkl mnop"
+                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-xs font-mono text-indigo-300 focus:border-indigo-500 outline-none"
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -852,7 +884,7 @@ export default function Home() {
                   value={rawSheetData}
                   onChange={(e) => setRawSheetData(e.target.value)}
                   placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com"
-                  className="w-full flex-1 min-h-[300px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
+                  className="w-full flex-1 min-h-[260px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
                 />
               </div>
             </div>
@@ -956,13 +988,13 @@ export default function Home() {
                   </div>
 
                   <textarea
-                    rows={10}
+                    rows={8}
                     required
                     disabled={loading}
                     value={template}
                     onChange={(e) => setTemplate(e.target.value)}
                     placeholder="Type your outreach message here..."
-                    className="w-full min-h-[210px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
+                    className="w-full min-h-[190px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
                   />
                 </div>
 
@@ -1033,7 +1065,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className={`grid grid-cols-1 ${!isVaultLoaded ? "sm:grid-cols-3" : "sm:grid-cols-2"} gap-3`}>
                   <InputField
                     label="Active Sender Gmail"
                     type="email"
@@ -1041,7 +1073,7 @@ export default function Home() {
                     disabled={loading}
                     value={senderEmail}
                     onChange={(e) => setSenderEmail(e.target.value)}
-                    className="font-mono bg-slate-900 border-slate-700"
+                    className="font-mono bg-slate-900 border-slate-700 text-xs"
                   />
 
                   <InputField
@@ -1051,8 +1083,32 @@ export default function Home() {
                     disabled={loading}
                     value={senderName}
                     onChange={(e) => setSenderName(e.target.value)}
-                    className="bg-slate-900 border-slate-700"
+                    className="bg-slate-900 border-slate-700 text-xs"
                   />
+
+                  {!isVaultLoaded && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between items-center">
+                        <label className="text-[10px] font-bold text-slate-300">Live App Password</label>
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="text-[9px] text-indigo-400 hover:text-indigo-300 font-mono cursor-pointer"
+                        >
+                          {showPassword ? "Hide" : "Show"}
+                        </button>
+                      </div>
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        required
+                        disabled={loading}
+                        value={appPassword}
+                        onChange={(e) => setAppPassword(e.target.value)}
+                        placeholder="16-digit password"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs font-mono text-indigo-300 focus:border-indigo-500 outline-none"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">

@@ -31,6 +31,9 @@ export default function VaultManagerPage() {
   const [senderName, setSenderName] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showFormPassword, setShowFormPassword] = useState(false);
+  
+  // ⚡ सबमिशन गार्ड ताकि बटन पेंडिंग में न अटके
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleTabClick = (tier: ProfileTier) => {
     setActiveTab(tier);
@@ -42,7 +45,7 @@ export default function VaultManagerPage() {
 
   const handleSaveAccount = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email || !senderName || !machineId) return;
+    if (!email || !senderName || !machineId || isSubmitting) return;
 
     const cleanEmail = email.trim().toLowerCase();
     const cleanSenderName = senderName.trim();
@@ -54,45 +57,58 @@ export default function VaultManagerPage() {
       return;
     }
 
-    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+    const savedSession = (typeof window !== "undefined" ? localStorage.getItem(SESSION_TOKEN_KEY) : "") || "";
+    setIsSubmitting(true);
 
-    if (editingId) {
-      const updateData: Record<string, any> = { senderName: cleanSenderName, profileTier: activeTab };
-      if (rawPassword.length > 0) updateData.appPassword = sanitizedPassword;
+    try {
+      if (editingId) {
+        const updateData: Record<string, any> = { senderName: cleanSenderName, profileTier: activeTab };
+        if (rawPassword.length > 0) updateData.appPassword = sanitizedPassword;
 
-      const res = await fetch("/api/smtp-vault", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ machineId, sessionToken: savedSession, accountId: editingId, updateType: "EDIT", updateData }),
-      });
+        const res = await fetch("/api/smtp-vault", {
+          method: "PATCH",
+          headers: { 
+            "Content-Type": "application/json",
+            "x-session-token": savedSession,
+          },
+          body: JSON.stringify({ machineId, sessionToken: savedSession, accountId: editingId, updateType: "EDIT", updateData }),
+        });
 
-      if (res.ok) {
-        fetchOnlyActiveTier(activeTab);
-        handleCancelEdit();
+        if (res.ok) {
+          await fetchOnlyActiveTier(activeTab);
+          handleCancelEdit();
+        } else {
+          const data = await res.json();
+          alert(data.error || "Failed to update account");
+        }
       } else {
-        const data = await res.json();
-        alert(data.error || "Failed to update account");
-      }
-    } else {
-      const res = await fetch("/api/smtp-vault", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          machineId,
-          sessionToken: savedSession,
-          accountData: { email: cleanEmail, appPassword: sanitizedPassword, senderName: cleanSenderName, profileTier: activeTab },
-        }),
-      });
+        const res = await fetch("/api/smtp-vault", {
+          method: "POST",
+          headers: { 
+            "Content-Type": "application/json",
+            "x-session-token": savedSession,
+          },
+          body: JSON.stringify({
+            machineId,
+            sessionToken: savedSession,
+            accountData: { email: cleanEmail, appPassword: sanitizedPassword, senderName: cleanSenderName, profileTier: activeTab },
+          }),
+        });
 
-      if (res.ok) {
-        fetchOnlyActiveTier(activeTab);
-        setEmail("");
-        setAppPassword("");
-        setSenderName("");
-      } else {
-        const data = await res.json();
-        alert(data.error || "Failed to add account");
+        if (res.ok) {
+          await fetchOnlyActiveTier(activeTab);
+          setEmail("");
+          setAppPassword("");
+          setSenderName("");
+        } else {
+          const data = await res.json();
+          alert(data.error || "Failed to add account");
+        }
       }
+    } catch (err: any) {
+      alert("Network Error: " + (err.message || "Failed to communicate with vault API"));
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -146,8 +162,7 @@ export default function VaultManagerPage() {
         <div className="flex items-center justify-between bg-slate-900 border border-slate-800 p-5 rounded-3xl shadow-xl">
           <div className="space-y-1">
             <h1 className="text-xl font-black text-white flex items-center gap-2">
-              <img src="/icons/engine-hub.svg" alt="Hub" className="w-6 h-6 object-contain" />
-              Multi-Profile SMTP Account Vault
+              <span className="text-indigo-400">🛡️</span> Multi-Profile SMTP Account Vault
             </h1>
             <p className="text-xs text-slate-400 font-mono">
               Hardware Binding: <span className="text-indigo-400">{machineId || "Authenticating..."}</span>
@@ -205,7 +220,7 @@ export default function VaultManagerPage() {
         <form onSubmit={handleSaveAccount} className="bg-slate-900/90 border border-slate-800 p-5 rounded-3xl space-y-4 shadow-xl">
           <div className="flex justify-between items-center">
             <h2 className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
-              <img src="/icons/sparkle-star.svg" alt="Star" className="w-3.5 h-3.5 object-contain" />
+              <span>✨</span>
               {editingId ? "✏️ Edit Sender Credentials" : `Add Sender to ${TIER_META[activeTab].label}`}
             </h2>
             <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold border ${TIER_META[activeTab].borderText}`}>
@@ -217,7 +232,7 @@ export default function VaultManagerPage() {
             <input
               type="email"
               required
-              disabled={!!editingId}
+              disabled={!!editingId || isSubmitting}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="Sender Gmail ID"
@@ -227,10 +242,11 @@ export default function VaultManagerPage() {
               <input
                 type={showFormPassword ? "text" : "password"}
                 required={!editingId}
+                disabled={isSubmitting}
                 value={appPassword}
                 onChange={(e) => setAppPassword(e.target.value)}
                 placeholder={editingId ? "Leave blank to keep same password" : "16-Letter App Password"}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-3 pr-8 py-2 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-3 pr-8 py-2 text-xs text-amber-300 font-mono outline-none focus:border-indigo-500 disabled:opacity-50"
               />
               <button
                 type="button"
@@ -243,21 +259,40 @@ export default function VaultManagerPage() {
             <input
               type="text"
               required
+              disabled={isSubmitting}
               value={senderName}
               onChange={(e) => setSenderName(e.target.value)}
               placeholder="Display Name (e.g. Sales Team)"
-              className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500"
+              className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white outline-none focus:border-indigo-500 disabled:opacity-50"
             />
           </div>
 
           <div className="flex gap-2">
             {editingId && (
-              <button type="button" onClick={handleCancelEdit} className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition">
+              <button 
+                type="button" 
+                onClick={handleCancelEdit} 
+                disabled={isSubmitting}
+                className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition disabled:opacity-50"
+              >
                 Cancel Edit
               </button>
             )}
-            <button type="submit" className="flex-1 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold transition shadow-md">
-              {editingId ? "💾 Update Sender Credentials" : `+ Save Account into ${TIER_META[activeTab].badge}`}
+            <button 
+              type="submit" 
+              disabled={isSubmitting}
+              className="flex-1 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold transition shadow-md disabled:opacity-50 cursor-pointer flex justify-center items-center gap-2"
+            >
+              {isSubmitting ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <span>Saving Account...</span>
+                </>
+              ) : editingId ? (
+                "💾 Update Sender Credentials"
+              ) : (
+                `+ Save Account into ${TIER_META[activeTab].badge}`
+              )}
             </button>
           </div>
         </form>

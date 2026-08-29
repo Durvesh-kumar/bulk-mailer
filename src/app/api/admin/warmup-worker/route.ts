@@ -7,7 +7,7 @@ import nodemailer from "nodemailer";
 import { ImapFlow } from "imapflow";
 import { getRandomWarmupMessage } from "@/lib/warmupTopics";
 
-const WARMUP_TAG = "[WU-VERIFIED]";
+const WARMUP_TAG = "[WU-VERIFIED-NODE]";
 
 const REPLIES = [
   "Thanks for the update. Looks good to me!",
