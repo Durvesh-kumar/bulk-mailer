@@ -5,8 +5,7 @@ import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 import { decryptPassword } from "@/lib/encryption";
 import { getRandomWarmupMessage } from "@/lib/warmupTopics";
 import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
-
-const WARMUP_TAG = "[WU-VERIFIED-NODE]";
+import { WARMUP_TAG } from "@/types/vault";
 
 const pickRandom = (arr: string[] | undefined, fallback: string): string => {
   if (!arr || arr.length === 0) return fallback;

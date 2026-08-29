@@ -1,13 +1,10 @@
-// src/app/api/admin/rescue-worker/route.ts
 import { NextResponse, NextRequest } from "next/server";
 import { getTenantDB } from "@/lib/db/tenantDb";
 import { getSmtpVaultModel } from "@/lib/models/SmtpVault";
 import { decryptPassword } from "@/lib/encryption";
 import nodemailer from "nodemailer";
 import Imap from "node-imap";
-
-// 🎯 आपका सटीक ओरिजिनल टैग
-const WARMUP_TAG = "[WU-VERIFIED-NODE]";
+import { WARMUP_TAG } from "@/types/vault";
 
 const REPLIES = [
   "Thanks for the update. Looks good to me!",
@@ -18,7 +15,6 @@ const REPLIES = [
 ];
 
 const pickRandom = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
-
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isAuthorizedAdmin(req: NextRequest): boolean {
@@ -148,6 +144,7 @@ function inspectAndRescueMailbox(
             msg.once("end", () => {
               if (subject && subject.includes(WARMUP_TAG) && currentUid) {
                 rescued++;
+                // ✅ Spam से हटाकर Inbox में मूव करें और Important/Flagged मार्क करें
                 imap.addFlags(currentUid, ["\\Flagged"], () => {});
                 imap.move(currentUid, "INBOX", () => {});
 
@@ -171,7 +168,7 @@ function inspectAndRescueMailbox(
       });
     });
 
-    // 🔍 2. INBOX फ़ोल्डर चेक और 2-Way Reply की तैयारी
+    // 🔍 2. INBOX फ़ोल्डर चेक और रिप्लाई प्रोसेस
     const checkInbox = () => {
       imap.openBox("INBOX", false, (inboxErr) => {
         if (inboxErr) {
@@ -218,6 +215,7 @@ function inspectAndRescueMailbox(
 
             msg.once("end", () => {
               if (subject && subject.includes(WARMUP_TAG) && currentUid) {
+                // ✅ मेल को Open (Seen) और Important (Flagged) मार्क करें
                 imap.addFlags(currentUid, ["\\Flagged", "\\Seen"], () => {});
 
                 const emailMatch = from.match(/<([^>]+)>/) || [null, from];
@@ -288,12 +286,12 @@ export async function POST(req: NextRequest) {
       for (let i = 0; i < pendingReplies.length; i++) {
         const item = pendingReplies[i];
         try {
-          const cleanSubject = item.subject.replace(WARMUP_TAG, "").trim();
-          const replySubject = cleanSubject.toLowerCase().startsWith("re:")
-            ? cleanSubject
-            : `Re: ${cleanSubject}`;
+          // ✅ FIX: WARMUP_TAG को डिलीट करने के बजाय सुरक्षित रखें और आगे Re: लगाएं
+          let replySubject = item.subject.trim();
+          if (!replySubject.toLowerCase().startsWith("re:")) {
+            replySubject = `Re: ${replySubject}`;
+          }
 
-          // 🛡️ असली इनबॉक्स थ्रेड हेडर
           const mailPayload: any = {
             from: cleanReceiverName ? `"${cleanReceiverName}" <${cleanEmail}>` : cleanEmail,
             to: item.sender,
@@ -301,6 +299,7 @@ export async function POST(req: NextRequest) {
             text: pickRandom(REPLIES),
           };
 
+          // 🛡️ Conversation Threadिंग हेडर्स
           if (item.messageId) {
             mailPayload.inReplyTo = item.messageId;
             mailPayload.references = item.messageId;
@@ -326,8 +325,8 @@ export async function POST(req: NextRequest) {
       failed: 0,
       log:
         rescued > 0 || repliedCount > 0
-          ? `🚨 [${cleanEmail}] ➔ Matched [WU-VERIFIED-NODE]! Rescued: ${rescued} | Replied: ${repliedCount}`
-          : `🛡️ [${cleanEmail}] ➔ Clean (No [WU-VERIFIED-NODE] tag in last 12h)`,
+          ? `🚨 [${cleanEmail}] ➔ Matched [${WARMUP_TAG}]! Rescued: ${rescued} | Replied: ${repliedCount}`
+          : `🛡️ [${cleanEmail}] ➔ Clean (No [${WARMUP_TAG}] tag in last 12h)`,
     });
   } catch (err: any) {
     const errStr = String(err?.message || "");

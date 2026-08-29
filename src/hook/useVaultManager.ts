@@ -61,7 +61,7 @@ export function useVaultManager(machineId: string) {
     const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
     try {
-      const res = await fetch("/api/smtp-vault", {
+      const res = await fetch("/api/smtp-vault/decrypt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -97,7 +97,7 @@ export function useVaultManager(machineId: string) {
       } else {
         try {
           const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-          const res = await fetch("/api/smtp-vault", {
+          const res = await fetch("/api/smtp-vault/decrypt", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({

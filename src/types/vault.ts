@@ -65,3 +65,4 @@ export const TIER_META: Record<
 export const SESSION_TOKEN_KEY = "reachout_daily_session_token";
 export const PENDING_QUEUE_STORAGE_KEY = "inboxsend_pending_queue_state";
 export const SENDERS_COOLDOWN_STORAGE_KEY = "inboxsend_senders_cooldown_state";
+export const WARMUP_TAG = "[WU-VERIFIED-NODE]";

@@ -6,8 +6,7 @@ import { decryptPassword } from "@/lib/encryption";
 import nodemailer from "nodemailer";
 import { ImapFlow } from "imapflow";
 import { getRandomWarmupMessage } from "@/lib/warmupTopics";
-
-const WARMUP_TAG = "[WU-VERIFIED-NODE]";
+import { WARMUP_TAG } from "@/types/vault";
 
 const REPLIES = [
   "Thanks for the update. Looks good to me!",
