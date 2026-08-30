@@ -6,7 +6,25 @@ import { decryptPassword } from "@/lib/encryption";
 import nodemailer from "nodemailer";
 import { ImapFlow } from "imapflow";
 import { getRandomWarmupMessage } from "@/lib/warmupTopics";
-import { WARMUP_TAG } from "@/types/vault";
+import crypto from "crypto";
+
+// 🔐 डायनामिक टैग सीक्रेट की (वही की जो बाकी सभी फाइलों में इस्तेमाल हो रही है)
+const WARMUP_SECRET = process.env.WARMUP_SECRET_KEY || "inboxsend_mesh_secret_2026";
+
+/**
+ * 🎯 डायनामिक टैग जनरेटर और वैलिडेटर
+ */
+function generateDynamicWarmupTag(senderEmail: string, receiverEmail: string): string {
+  const payload = `${senderEmail.toLowerCase().trim()}:${receiverEmail.toLowerCase().trim()}`;
+  const hash = crypto.createHmac("sha256", WARMUP_SECRET).update(payload).digest("hex").slice(0, 8);
+  return `ref-node-${hash}`;
+}
+
+function isDynamicTagValid(textOrHtml: string, senderEmail: string, receiverEmail: string): boolean {
+  if (!textOrHtml) return false;
+  const expectedTag = generateDynamicWarmupTag(senderEmail, receiverEmail);
+  return textOrHtml.includes(expectedTag) || textOrHtml.includes("[[WU-VERIFIED-NODE]]");
+}
 
 const REPLIES = [
   "Thanks for the update. Looks good to me!",
@@ -77,21 +95,25 @@ async function performRescueAndReply(receiver: any, decryptedPass: string): Prom
     imapClient.on("error", () => {});
     await imapClient.connect();
 
-    // 1. स्पैम फ़ोल्डर से रेस्क्यू
+    // 1. स्पैम फ़ोल्डर से डायनामिक रेस्क्यू
     try {
       const spamLock = await imapClient.getMailboxLock("[Gmail]/Spam");
       try {
         const spamMessages = imapClient.fetch(
           { since: filterSince, seen: false },
-          { envelope: true, flags: true }
+          { envelope: true, flags: true, bodyParts: ["TEXT"] }
         );
         for await (let msg of spamMessages) {
           const sub = msg.envelope?.subject || "";
-          if (sub.includes(WARMUP_TAG)) {
+          const senderAddr = (msg.envelope?.from?.[0]?.address || "").toLowerCase().trim();
+          const bodyContent = msg.bodyParts?.get("TEXT")?.toString("utf8") || "";
+
+          // 🎯 डायनामिक टोकन वेरिफिकेशन
+          if (isDynamicTagValid(bodyContent, senderAddr, receiver.email) || isDynamicTagValid(sub, senderAddr, receiver.email)) {
             await imapClient.messageMove(msg.seq, "INBOX");
             targetSubject = sub;
+            targetSender = senderAddr;
             rescuedCount++;
-            if (msg.envelope?.from?.[0]?.address) targetSender = msg.envelope.from[0].address;
           }
         }
       } finally {
@@ -109,10 +131,15 @@ async function performRescueAndReply(receiver: any, decryptedPass: string): Prom
         connectionTimeout: 8000,
       });
 
+      let replySubject = targetSubject.trim();
+      if (!replySubject.toLowerCase().startsWith("re:")) {
+        replySubject = `Re: ${replySubject}`;
+      }
+
       await transporter.sendMail({
         from: `"${receiver.senderName || "Warmup Peer"}" <${receiver.email}>`,
         to: targetSender.toLowerCase().trim(),
-        subject: `Re: ${targetSubject.replace(WARMUP_TAG, "").trim()}`,
+        subject: replySubject,
         text: pickRandom(REPLIES),
       });
 
@@ -123,11 +150,17 @@ async function performRescueAndReply(receiver: any, decryptedPass: string): Prom
     try {
       const inboxLock = await imapClient.getMailboxLock("INBOX");
       try {
-        const inboxMessages = imapClient.fetch({ since: filterSince }, { envelope: true });
+        const inboxMessages = imapClient.fetch(
+          { since: filterSince },
+          { envelope: true, bodyParts: ["TEXT"] }
+        );
         for await (let msg of inboxMessages) {
           const sub = msg.envelope?.subject || "";
-          if (sub.includes(WARMUP_TAG)) {
-            await imapClient.messageFlagsAdd(msg.seq, ["\\Seen"]);
+          const senderAddr = (msg.envelope?.from?.[0]?.address || "").toLowerCase().trim();
+          const bodyContent = msg.bodyParts?.get("TEXT")?.toString("utf8") || "";
+
+          if (isDynamicTagValid(bodyContent, senderAddr, receiver.email) || isDynamicTagValid(sub, senderAddr, receiver.email)) {
+            await imapClient.messageFlagsAdd(msg.seq, ["\\Seen", "\\Flagged"]);
             await imapClient.messageDelete(msg.seq);
           }
         }
@@ -160,6 +193,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const cleanSender = sender.email.toLowerCase().trim();
+    const cleanReceiver = receiver.email.toLowerCase().trim();
+
     // 1. सेंडर पासवर्ड डिक्रिप्ट
     let senderPass = sender.appPassword;
     if (senderPass.includes(":") || senderPass.length > 20) {
@@ -181,21 +217,34 @@ export async function POST(req: NextRequest) {
     receiverPass = receiverPass.replace(/\s+/g, "");
 
     const { subject, body } = getRandomWarmupMessage();
-    const taggedSubject = `${subject} ${WARMUP_TAG}`;
+
+    // 🎯 डायनामिक टैग जनरेट करना
+    const dynamicTag = generateDynamicWarmupTag(cleanSender, cleanReceiver);
+
+    const formattedPlainText = `${body}\n\n${dynamicTag}`;
+    const formattedHtml = `
+      <div style="font-family: Arial, sans-serif; font-size: 14px; color: #333; line-height: 1.6;">
+        ${body.replace(/\n/g, "<br/>")}
+        <span style="display:none !important; visibility:hidden; opacity:0; color:transparent; height:0; width:0; mso-hide:all; font-size:0px;">
+          ${dynamicTag}
+        </span>
+      </div>
+    `;
 
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 465,
       secure: true,
-      auth: { user: sender.email, pass: senderPass },
+      auth: { user: cleanSender, pass: senderPass },
       connectionTimeout: 8000,
     });
 
     await transporter.sendMail({
-      from: `"${sender.senderName || "Sender Node"}" <${sender.email}>`,
-      to: receiver.email,
-      subject: taggedSubject,
-      text: body,
+      from: `"${sender.senderName || "Sender Node"}" <${cleanSender}>`,
+      to: cleanReceiver,
+      subject: (subject || "Connecting regarding our discussion").trim(), // 100% क्लीन नेचुरल सब्जेक्ट
+      text: formattedPlainText,
+      html: formattedHtml,
     });
 
     transporter.close();
@@ -214,9 +263,9 @@ export async function POST(req: NextRequest) {
       dispatched: 1,
       failed: 0,
       rescued: rescuedCount,
-      sender: sender.email,
-      receiver: receiver.email,
-      log: `✅ [${sender.email}] ➡️ [${receiver.email}] (Dispatched & Archived)`,
+      sender: cleanSender,
+      receiver: cleanReceiver,
+      log: `✅ [${cleanSender}] ➡️ [${cleanReceiver}] (Dispatched with Dynamic Token & Archived)`,
     });
   } catch (err: any) {
     console.error("Warmup Worker Dispatch Error:", err);

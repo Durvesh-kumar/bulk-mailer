@@ -1,11 +1,20 @@
 // src/app/api/silent-warmup/route.ts
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
+import crypto from "crypto";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
 import { decryptPassword } from "@/lib/encryption";
 import { getRandomWarmupMessage } from "@/lib/warmupTopics";
 import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
-import { WARMUP_TAG } from "@/types/vault";
+
+// 🔐 डायनामिक टैग सीक्रेट की (वही की जो रेस्क्यू इंजन में इस्तेमाल हो रही है)
+const WARMUP_SECRET = process.env.WARMUP_SECRET_KEY || "inboxsend_mesh_secret_2026";
+
+function generateDynamicWarmupTag(senderEmail: string, receiverEmail: string): string {
+  const payload = `${senderEmail.toLowerCase().trim()}:${receiverEmail.toLowerCase().trim()}`;
+  const hash = crypto.createHmac("sha256", WARMUP_SECRET).update(payload).digest("hex").slice(0, 8);
+  return `ref-node-${hash}`;
+}
 
 const pickRandom = (arr: string[] | undefined, fallback: string): string => {
   if (!arr || arr.length === 0) return fallback;
@@ -76,7 +85,7 @@ export async function POST(req: Request) {
           user: cleanSender,
           pass: cleanPassword,
         },
-        name: "mail.google.com",
+        // name: "mail.google.com",
       });
     };
 
@@ -94,24 +103,38 @@ export async function POST(req: Request) {
         ""
       );
 
-    const formattedPlainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanBody}\n\n${randomSignOff}\n\n${cleanHeaderName}`;
+    // 🎯 डायनामिक टैग जनरेट करना
+    const dynamicTag = generateDynamicWarmupTag(cleanSender, cleanReceiver);
 
-    const baseSubject = (subject || "Connecting regarding our conversation").trim();
-    const finalSubjectWithTag = baseSubject.includes(WARMUP_TAG)
-      ? baseSubject
-      : `${baseSubject} ${WARMUP_TAG}`;
+    // ✅ प्लेन टेक्स्ट और HTML दोनों में अदृश्य (Invisible) डायनामिक टैग जोड़ना
+    const formattedPlainText = `${randomGreeting}\n\n${randomOpener}\n\n${cleanBody}\n\n${randomSignOff}\n\n${cleanHeaderName}\n\n${dynamicTag}`;
+
+    const formattedHtml = `
+      <div style="font-family: Arial, sans-serif; font-size: 14px; color: #333; line-height: 1.6;">
+        <p>${randomGreeting}</p>
+        <p>${randomOpener}</p>
+        <p>${cleanBody.replace(/\n/g, "<br/>")}</p>
+        <p>${randomSignOff}<br/>${cleanHeaderName}</p>
+        <span style="display:none !important; visibility:hidden; opacity:0; color:transparent; height:0; width:0; mso-hide:all; font-size:0px;">
+          ${dynamicTag}
+        </span>
+      </div>
+    `;
+
+    // 🎯 100% नेचुरल सब्जेक्ट (कोई हार्डकोडेड टैग नहीं)
+    const finalSubject = (subject || "Connecting regarding our conversation").trim();
 
     // 🔌 नया फ्रेश कनेक्शन ओपन करें
     const activeTransporter = createFreshTransport();
     let info: nodemailer.SentMessageInfo;
 
     try {
-      // 📨 100% ओरिजिनल Google MIME हेडर डिस्पैच
       info = await activeTransporter.sendMail({
         from: cleanHeaderName ? `"${cleanHeaderName}" <${cleanSender}>` : cleanSender,
         to: cleanReceiver,
-        subject: finalSubjectWithTag,
+        subject: finalSubject,
         text: formattedPlainText,
+        html: formattedHtml,
       });
     } catch (err: any) {
       const isAuthError = err.code === "EAUTH" || err.responseCode === 535;
@@ -123,7 +146,6 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     } finally {
-      // 🔒 मेल जाते ही कनेक्शन तुरंत पूरी तरह क्लोज़ (Socket Terminated)
       activeTransporter.close();
     }
 

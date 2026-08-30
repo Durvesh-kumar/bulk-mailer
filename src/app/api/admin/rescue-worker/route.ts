@@ -4,7 +4,26 @@ import { getSmtpVaultModel } from "@/lib/models/SmtpVault";
 import { decryptPassword } from "@/lib/encryption";
 import nodemailer from "nodemailer";
 import Imap from "node-imap";
-import { WARMUP_TAG } from "@/types/vault";
+import crypto from "crypto";
+
+// 🔐 डायनामिक टैग सीक्रेट की (Environment variable या fallback)
+const WARMUP_SECRET = process.env.WARMUP_SECRET_KEY || "inboxsend_mesh_secret_2026";
+
+/**
+ * 🎯 डायनामिक टैग जनरेटर और वैलिडेटर
+ * यह सेंडर और रिसीवर के कॉम्बिनेशन से यूनिक टोकन बनाता है (उदा. "ref-node-8a3f91c2")
+ */
+export function generateDynamicWarmupTag(senderEmail: string, receiverEmail: string): string {
+  const payload = `${senderEmail.toLowerCase().trim()}:${receiverEmail.toLowerCase().trim()}`;
+  const hash = crypto.createHmac("sha256", WARMUP_SECRET).update(payload).digest("hex").slice(0, 8);
+  return `ref-node-${hash}`;
+}
+
+export function isDynamicTagValid(textOrHtml: string, senderEmail: string, receiverEmail: string): boolean {
+  if (!textOrHtml) return false;
+  const expectedTag = generateDynamicWarmupTag(senderEmail, receiverEmail);
+  return textOrHtml.includes(expectedTag) || textOrHtml.includes("[[WU-VERIFIED-NODE]]"); // बैकवर्ड कम्पैटिबिलिटी
+}
 
 const REPLIES = [
   "Thanks for the update. Looks good to me!",
@@ -97,43 +116,48 @@ function inspectAndRescueMailbox(
     });
 
     imap.once("ready", () => {
-      // 🔍 1. SPAM फ़ोल्डर चेक और रेस्क्यू
+      // 🔍 1. SPAM फ़ोल्डर चेक और डायनामिक रेस्क्यू
       imap.openBox("[Gmail]/Spam", false, (err) => {
         if (err) {
           checkInbox();
           return;
         }
 
-        imap.search(["UNSEEN", ["SINCE", filterSince], ["HEADER", "SUBJECT", WARMUP_TAG]], (searchErr, results) => {
+        imap.search(["UNSEEN", ["SINCE", filterSince]], (searchErr, results) => {
           if (searchErr || !results || results.length === 0) {
             checkInbox();
             return;
           }
 
-          const fetcher = imap.fetch(results, { bodies: "HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)", struct: true });
+          const fetcher = imap.fetch(results, { bodies: ["HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)", "TEXT"], struct: true });
           
           fetcher.on("message", (msg) => {
             let subject = "";
             let from = "";
             let origMessageId = "";
+            let bodyText = "";
             let currentUid: number | null = null;
 
-            msg.on("body", (stream) => {
+            msg.on("body", (stream, info) => {
               let buffer = "";
               stream.on("data", (chunk) => { buffer += chunk.toString("utf8"); });
               stream.once("end", () => {
-                const lines = buffer.split("\r\n");
-                lines.forEach((line) => {
-                  if (line.toLowerCase().startsWith("subject:")) {
-                    subject = line.substring(8).trim();
-                  }
-                  if (line.toLowerCase().startsWith("from:")) {
-                    from = line.substring(5).trim();
-                  }
-                  if (line.toLowerCase().startsWith("message-id:")) {
-                    origMessageId = line.substring(11).trim();
-                  }
-                });
+                if (info.which === "TEXT") {
+                  bodyText = buffer;
+                } else {
+                  const lines = buffer.split("\r\n");
+                  lines.forEach((line) => {
+                    if (line.toLowerCase().startsWith("subject:")) {
+                      subject = line.substring(8).trim();
+                    }
+                    if (line.toLowerCase().startsWith("from:")) {
+                      from = line.substring(5).trim();
+                    }
+                    if (line.toLowerCase().startsWith("message-id:")) {
+                      origMessageId = line.substring(11).trim();
+                    }
+                  });
+                }
               });
             });
 
@@ -142,17 +166,20 @@ function inspectAndRescueMailbox(
             });
 
             msg.once("end", () => {
-              if (subject && subject.includes(WARMUP_TAG) && currentUid) {
+              const emailMatch = from.match(/<([^>]+)>/) || [null, from];
+              const cleanSender = (emailMatch[1] || from).toLowerCase().trim();
+
+              // 🎯 डायनामिक टैग मैचिंग (सब्जेक्ट या बॉडी में)
+              const isMatched = isDynamicTagValid(bodyText, cleanSender, email) || isDynamicTagValid(subject, cleanSender, email);
+
+              if (isMatched && currentUid) {
                 rescued++;
-                // ✅ Spam से हटाकर Inbox में मूव करें और Important/Flagged मार्क करें
                 imap.addFlags(currentUid, ["\\Flagged"], () => {});
                 imap.move(currentUid, "INBOX", () => {});
 
-                const emailMatch = from.match(/<([^>]+)>/) || [null, from];
-                const cleanSender = emailMatch[1] || from;
                 if (cleanSender) {
                   pendingReplies.push({
-                    sender: cleanSender.toLowerCase().trim(),
+                    sender: cleanSender,
                     subject,
                     messageId: origMessageId,
                   });
@@ -168,7 +195,7 @@ function inspectAndRescueMailbox(
       });
     });
 
-    // 🔍 2. INBOX फ़ोल्डर चेक और रिप्लाई प्रोसेस
+    // 🔍 2. INBOX फ़ोल्डर चेक और डायनामिक रिप्लाई प्रोसेस
     const checkInbox = () => {
       imap.openBox("INBOX", false, (inboxErr) => {
         if (inboxErr) {
@@ -176,36 +203,41 @@ function inspectAndRescueMailbox(
           return;
         }
 
-        imap.search(["UNSEEN", ["SINCE", filterSince], ["HEADER", "SUBJECT", WARMUP_TAG]], (searchErr, results) => {
+        imap.search(["UNSEEN", ["SINCE", filterSince]], (searchErr, results) => {
           if (searchErr || !results || results.length === 0) {
             finish();
             return;
           }
 
-          const fetcher = imap.fetch(results, { bodies: "HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)", struct: true });
+          const fetcher = imap.fetch(results, { bodies: ["HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)", "TEXT"], struct: true });
           
           fetcher.on("message", (msg) => {
             let subject = "";
             let from = "";
             let origMessageId = "";
+            let bodyText = "";
             let currentUid: number | null = null;
 
-            msg.on("body", (stream) => {
+            msg.on("body", (stream, info) => {
               let buffer = "";
               stream.on("data", (chunk) => { buffer += chunk.toString("utf8"); });
               stream.once("end", () => {
-                const lines = buffer.split("\r\n");
-                lines.forEach((line) => {
-                  if (line.toLowerCase().startsWith("subject:")) {
-                    subject = line.substring(8).trim();
-                  }
-                  if (line.toLowerCase().startsWith("from:")) {
-                    from = line.substring(5).trim();
-                  }
-                  if (line.toLowerCase().startsWith("message-id:")) {
-                    origMessageId = line.substring(11).trim();
-                  }
-                });
+                if (info.which === "TEXT") {
+                  bodyText = buffer;
+                } else {
+                  const lines = buffer.split("\r\n");
+                  lines.forEach((line) => {
+                    if (line.toLowerCase().startsWith("subject:")) {
+                      subject = line.substring(8).trim();
+                    }
+                    if (line.toLowerCase().startsWith("from:")) {
+                      from = line.substring(5).trim();
+                    }
+                    if (line.toLowerCase().startsWith("message-id:")) {
+                      origMessageId = line.substring(11).trim();
+                    }
+                  });
+                }
               });
             });
 
@@ -214,15 +246,18 @@ function inspectAndRescueMailbox(
             });
 
             msg.once("end", () => {
-              if (subject && subject.includes(WARMUP_TAG) && currentUid) {
-                // ✅ मेल को Open (Seen) और Important (Flagged) मार्क करें
+              const emailMatch = from.match(/<([^>]+)>/) || [null, from];
+              const cleanSender = (emailMatch[1] || from).toLowerCase().trim();
+
+              // 🎯 डायनामिक टैग मैचिंग
+              const isMatched = isDynamicTagValid(bodyText, cleanSender, email) || isDynamicTagValid(subject, cleanSender, email);
+
+              if (isMatched && currentUid) {
                 imap.addFlags(currentUid, ["\\Flagged", "\\Seen"], () => {});
 
-                const emailMatch = from.match(/<([^>]+)>/) || [null, from];
-                const cleanSender = emailMatch[1] || from;
-                if (cleanSender && !pendingReplies.some((r) => r.sender === cleanSender.toLowerCase().trim())) {
+                if (cleanSender && !pendingReplies.some((r) => r.sender === cleanSender)) {
                   pendingReplies.push({
-                    sender: cleanSender.toLowerCase().trim(),
+                    sender: cleanSender,
                     subject,
                     messageId: origMessageId,
                   });
@@ -273,20 +308,18 @@ export async function POST(req: NextRequest) {
 
     const { rescued, pendingReplies } = await inspectAndRescueMailbox(cleanEmail, receiverPass, filterSince);
 
-    // 📨 100% ऑथेंटिक 2-WAY THREADED REPLY
+    // 📨 2-WAY THREADED REPLY
     if (pendingReplies.length > 0) {
       const transporter = nodemailer.createTransport({
         host: "smtp.gmail.com",
         port: 465,
         secure: true,
         auth: { user: cleanEmail, pass: receiverPass },
-        // name: "mail.google.com",
       });
 
       for (let i = 0; i < pendingReplies.length; i++) {
         const item = pendingReplies[i];
         try {
-          // ✅ FIX: WARMUP_TAG को डिलीट करने के बजाय सुरक्षित रखें और आगे Re: लगाएं
           let replySubject = item.subject.trim();
           if (!replySubject.toLowerCase().startsWith("re:")) {
             replySubject = `Re: ${replySubject}`;
@@ -299,7 +332,6 @@ export async function POST(req: NextRequest) {
             text: pickRandom(REPLIES),
           };
 
-          // 🛡️ Conversation Threadिंग हेडर्स
           if (item.messageId) {
             mailPayload.inReplyTo = item.messageId;
             mailPayload.references = item.messageId;
@@ -309,7 +341,7 @@ export async function POST(req: NextRequest) {
           repliedCount++;
 
           if (i < pendingReplies.length - 1) {
-            await sleep(2000); // 2 सेकंड का जिटर डिले
+            await sleep(2000);
           }
         } catch (_) {}
       }
@@ -325,8 +357,8 @@ export async function POST(req: NextRequest) {
       failed: 0,
       log:
         rescued > 0 || repliedCount > 0
-          ? `🚨 [${cleanEmail}] ➔ Matched [${WARMUP_TAG}]! Rescued: ${rescued} | Replied: ${repliedCount}`
-          : `🛡️ [${cleanEmail}] ➔ Clean (No [${WARMUP_TAG}] tag in last 12h)`,
+          ? `🚨 [${cleanEmail}] ➔ Matched [Dynamic Token]! Rescued: ${rescued} | Replied: ${repliedCount}`
+          : `🛡️ [${cleanEmail}] ➔ Clean (No Dynamic Tag in last 12h)`,
     });
   } catch (err: any) {
     const errStr = String(err?.message || "");
