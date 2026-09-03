@@ -48,6 +48,7 @@ jobs:
           DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}
           EOF
 
       - name: Run Next.js Production Build
@@ -84,6 +85,7 @@ jobs:
           DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}
           EOF
 
       - name: Deploy to Personal Vercel
@@ -123,6 +125,7 @@ jobs:
           MONGODB_URI_USER=${{ secrets.MONGODB_URL_MANISH }}
           DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
+          GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}
           EOF
 
       - name: Deploy to Manish Vercel
@@ -163,6 +166,7 @@ jobs:
           DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}
           EOF
 
       - name: Deploy to Amit Vercel
@@ -202,6 +206,7 @@ jobs:
           DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}
           EOF
 
       - name: Deploy to Test Vercel
@@ -242,6 +247,7 @@ jobs:
           DB_ENCRYPTION_KEY=${{ secrets.DB_ENCRYPTION_KEY }}
           JWT_SECRET_KEY=${{ secrets.JWT_SECRET_KEY }}
           GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}
           EOF
 
       - name: Deploy to Khushi Vercel
