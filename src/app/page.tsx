@@ -668,7 +668,14 @@ export default function Home() {
             </div>
           </div>
 
+          {/* 🎯 Updated Action Bar with Lead Dashboard Route */}
           <div className="flex items-center gap-2">
+            <Link
+              href="/outlook/dashboard"
+              className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+            >
+              <span>📊</span> Lead Dashboard
+            </Link>
             <Link
               href="/vault"
               className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
@@ -800,7 +807,7 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* 🔑 Sender Details: वॉल्ट लोड होने पर पासवर्ड सेक्शन ऑटोमैटिक छिप जाएगा */}
+              {/* 🔑 Sender Details */}
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2.5 shadow-lg">
                 <div className={`grid grid-cols-1 ${!isVaultLoaded ? "sm:grid-cols-3" : "sm:grid-cols-2"} gap-2`}>
                   <InputField
@@ -825,7 +832,6 @@ export default function Home() {
                     className="text-xs"
                   />
 
-                  {/* 🔒 केवल मैन्युअल मोड में पासवर्ड फ़ील्ड दिखेगा */}
                   {!isVaultLoaded && (
                     <div className="space-y-1">
                       <div className="flex justify-between items-center">
