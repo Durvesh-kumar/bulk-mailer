@@ -270,7 +270,7 @@ export default function Home() {
     }
 
     const allToVerify = preCleaned.validEmails;
-    const CHUNK_SIZE = 15;
+    const CHUNK_SIZE = 8;
     const verifiedValidEmails: string[] = [];
     const newlyRejectedList: RejectedEmailItem[] = [...preCleaned.rejectedList];
 

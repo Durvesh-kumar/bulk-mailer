@@ -25,12 +25,58 @@ async function enforceSecurity(req: Request, machineId?: string, sessionToken?: 
   return { allowed: true, machineId: guard.machineId, sessionToken: guard.sessionToken, userId: resolvedUserId };
 }
 
-// 🛡️ वार्म-अप और सिस्टम ऑटो-मेल्स को छोड़ने वाला फ़िल्टर
-function isWarmupOrSilentMail(subject: string, bodyText: string, htmlText: string): boolean {
+// 🛑 सिस्टम, बाउंस (Mailer-Daemon), थर्ड पार्टी (Google, Apollo, MongoDB) और वार्म-अप मेल्स को फ़िल्टर करने वाला फ़ंक्शन
+function isSystemOrIgnoredMail(
+  fromAddress: string, 
+  fromName: string, 
+  subject: string, 
+  bodyText: string, 
+  htmlText: string
+): boolean {
+  const from = (fromAddress || "").toLowerCase();
+  const name = (fromName || "").toLowerCase();
   const sub = (subject || "").toLowerCase();
   const text = (bodyText || "").toLowerCase();
   const html = (htmlText || "").toLowerCase();
 
+  // 1. बाउंस और डिलीवरी फेलियर नोटिफिकेशन्स (Address not found / Mailer-Daemon)
+  const isBounceOrFailure =
+    from.includes("mailer-daemon") ||
+    from.includes("postmaster") ||
+    sub.includes("address not found") ||
+    sub.includes("delivery status notification") ||
+    sub.includes("undelivered mail") ||
+    sub.includes("failure notice") ||
+    sub.includes("mail delivery failed") ||
+    text.includes("550 5.1.1") ||
+    text.includes("wasn't delivered to") ||
+    text.includes("address couldn't be found");
+
+  if (isBounceOrFailure) return true;
+
+  // 2. ऑटोमेटेड सेंडर्स और थर्ड पार्टी सर्विसेज (Google, Apollo, MongoDB, etc.)
+  const automatedSenders = [
+    "no-reply",
+    "noreply",
+    "notification",
+    "notifications",
+    "donotreply",
+    "google.com",
+    "googlealerts-noreply",
+    "apollo.io",
+    "mongodb.com",
+    "mailgun",
+    "sendgrid",
+    "postmark"
+  ];
+
+  const isAutomatedSender = automatedSenders.some(
+    (sender) => from.includes(sender) || name.includes(sender)
+  );
+
+  if (isAutomatedSender) return true;
+
+  // 3. वार्म-अप और ऑटो-टेस्टिंग टोकन्स
   if (
     sub.includes("ref-node-") ||
     text.includes("ref-node-") ||
@@ -42,7 +88,7 @@ function isWarmupOrSilentMail(subject: string, bodyText: string, htmlText: strin
     sub.includes("ref: #") ||
     text.includes("ref: #")
   ) {
-    return true; 
+    return true;
   }
 
   const warmupPrefixes = [
@@ -53,11 +99,11 @@ function isWarmupOrSilentMail(subject: string, bodyText: string, htmlText: strin
 
   const hasWarmupPrefix = warmupPrefixes.some((prefix) => sub.startsWith(prefix));
   if (
-    hasWarmupPrefix && 
+    hasWarmupPrefix &&
     (
-      text.includes("ref:") || 
-      text.includes("project roadmap") || 
-      text.includes("client deliverables") || 
+      text.includes("ref:") ||
+      text.includes("project roadmap") ||
+      text.includes("client deliverables") ||
       text.includes("weekly schedule") ||
       text.includes("quarterly objectives") ||
       text.includes("architecture design")
@@ -81,25 +127,26 @@ function detectEmailCategory(
   const sub = (subject || "").toLowerCase().trim();
   const text = (fullText || "").toLowerCase().trim();
 
-  // 1. अगर खुद अपने ही ईमेल से भेजा गया है तो सामान्य मानें
+  // 1. अगर खुद अपने ही ईमेल से भेजा गया है तो सामान्य रखें
   if (fromEmail && userEmail && fromEmail.toLowerCase().includes(userEmail.toLowerCase())) {
     return "NORMAL";
   }
 
-  // 2. ऑटो-रिप्लाई / बाउंस मेल्स
+  // 2. ऑटो-रिप्लाई / आउट ऑफ ऑफिस मेल्स
   if (
     sub.includes("out of office") || 
     sub.includes("automatic reply") || 
-    sub.includes("mailer-daemon") ||
-    sub.includes("delivery status")
+    sub.includes("auto-reply") ||
+    sub.includes("autoreply")
   ) {
     return "NORMAL";
   }
 
-  // 3. ❌ Negative / Cold कीवर्ड्स (इनपर अलर्ट बीप को रोकना)
+  // 3. ❌ Negative / Cold कीवर्ड्स
   const negativeKeywords = [
     "not interested", "no thanks", "dont contact", "don't contact",
-    "remove me", "unsubscribe", "stop emailing", "wrong person", "not looking"
+    "remove me", "unsubscribe", "stop emailing", "wrong person", "not looking",
+    "take me off", "please delete"
   ];
   const isNegative = negativeKeywords.some((kw) => text.includes(kw) || sub.includes(kw));
   if (isNegative) {
@@ -122,7 +169,12 @@ function detectEmailCategory(
     (kw) => text.includes(kw) || sub.includes(kw)
   );
 
-  if (inReplyTo || sub.startsWith("re:") || text.includes("wrote:") || hasClientIntent) {
+  // सिर्फ़ वास्तविक क्लाइंट इंटेंट या वास्तविक रिप्लाई पर ही REPLY सेट करें
+  if (hasClientIntent) {
+    return "REPLY";
+  }
+
+  if (inReplyTo || sub.startsWith("re:") || text.includes("wrote:")) {
     return "REPLY";
   }
 
@@ -184,20 +236,22 @@ async function fetchFolderMessages(
         continue;
       }
 
+      const senderEmail = parsed.from?.value?.[0]?.address || parsed.from?.text || "";
+      const senderName = parsed.from?.value?.[0]?.name || "";
       const subjectText = parsed.subject || "(No Subject)";
-      const snippetText = parsed.text ? parsed.text.slice(0, 160).replace(/\s+/g, " ").trim() : "";
       const fullTextBody = parsed.text || "";
       const htmlBody = (parsed.html as string) || "";
 
-      if (isWarmupOrSilentMail(subjectText, fullTextBody, htmlBody)) {
+      // 🛡️ गूगल बाउंस, Apollo, MongoDB और सिस्टम मेल्स को फेच होने से पहले ही छोड़ें
+      if (isSystemOrIgnoredMail(senderEmail, senderName, subjectText, fullTextBody, htmlBody)) {
         continue;
       }
 
+      const snippetText = parsed.text ? parsed.text.slice(0, 160).replace(/\s+/g, " ").trim() : "";
       const flags = item.attributes?.flags || [];
       const isUnread = !flags.includes("\\Seen");
       const isAnswered = flags.includes("\\Answered");
 
-      const senderEmail = parsed.from?.value?.[0]?.address || parsed.from?.text || "";
       const isFromMe = senderEmail.toLowerCase().includes(userEmail.toLowerCase());
 
       let category = detectEmailCategory(
@@ -227,7 +281,7 @@ async function fetchFolderMessages(
         uid: item.attributes.uid,
         messageId: parsed.messageId || `${Date.now()}-${Math.random()}`,
         from: senderEmail,
-        fromName: parsed.from?.value?.[0]?.name || "",
+        fromName: senderName,
         subject: subjectText,
         snippet: snippetText,
         fullText: fullTextBody,
@@ -247,7 +301,7 @@ async function fetchFolderMessages(
   return list;
 }
 
-// 🛠️ एक अकाउंट का इनबॉक्स प्रोसेस करने का सेफ हेल्पर (Fault-Tolerant)
+// 🛠️ एक अकाउंट का इनबॉक्स प्रोसेस करने का सेफ़ हेल्पर
 async function scanAccountInbox(acc: { email: string; appPassword: string }, hours: number) {
   let connection: any = null;
   try {
@@ -289,7 +343,6 @@ async function scanAccountInbox(acc: { email: string; appPassword: string }, hou
       authFailed: false,
     };
   } catch (err: any) {
-    // अगर पासवर्ड गलत है या IMAP एरर है, तो एरर लौटाएं लेकिन पूरे प्रोसेस को क्रैश न होने दें
     console.error(`⚠️ [IMAP Fail] Skipping faulty account: ${acc.email} | Reason: ${err.message}`);
     return { 
       email: acc.email, 
@@ -317,7 +370,6 @@ export async function POST(req: Request) {
 
     const hours = Number(scanHours) || 24;
 
-    // ⚡ 5-5 अकाउंट्स का चंक मोड (Promise.all से समानांतर स्कैन)
     if (Array.isArray(accounts) && accounts.length > 0) {
       const scanPromises = accounts.map((acc: any) => scanAccountInbox(acc, hours));
       const results = await Promise.all(scanPromises);
@@ -329,7 +381,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // 🎯 सिंगल अकाउंट मोड (मैन्युअल क्लिक के लिए)
     if (email && appPassword) {
       const singleResult = await scanAccountInbox({ email, appPassword }, hours);
       return NextResponse.json({

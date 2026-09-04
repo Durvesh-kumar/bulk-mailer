@@ -1,5 +1,6 @@
 // src/lib/leadCleaner.ts
 
+// डिस्पोजेबल / टेम्परेरी इनबॉक्स
 const DISPOSABLE_DOMAINS = new Set([
   "mailinator.com",
   "tempmail.com",
@@ -13,12 +14,29 @@ const DISPOSABLE_DOMAINS = new Set([
   "dispostable.com",
 ]);
 
+// डमी, सैंपल, प्लेसहोल्डर और बेकार डोमेन जो अक्सर वेब पेजों पर गलती से लिखे होते हैं
+const DUMMY_PLACEHOLDER_DOMAINS = new Set([
+  "email.com",         // स्क्रीनशॉट वाला info@email.com
+  "example.com",
+  "example.org",
+  "example.net",
+  "domain.com",
+  "yourdomain.com",
+  "sample.com",
+  "test.com",
+  "site.com",
+  "company.com",
+  "mycompany.com",
+  "website.com",
+  "fake.com",
+]);
+
 // सख्त Regex: शुरू में ^ और अंत में $ दोनों मौजूद हैं
 const EMAIL_STRICT_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
 export interface RejectedEmailItem {
   email: string;
-  reason: "INVALID_SYNTAX" | "DUPLICATE" | "DISPOSABLE_DOMAIN" | "NO_MX_RECORD" | string;
+  reason: "INVALID_SYNTAX" | "DUPLICATE" | "DISPOSABLE_DOMAIN" | "DUMMY_DOMAIN" | "NO_MX_RECORD" | string;
   description: string;
 }
 
@@ -31,6 +49,7 @@ export interface CleanLeadsResult {
   duplicatesCount: number;
   syntaxErrorsCount: number;
   disposableCount: number;
+  dummyCount: number;
   noMxCount: number;
   rejectedList: RejectedEmailItem[];
 }
@@ -76,6 +95,7 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
   let duplicatesCount = 0;
   let syntaxErrorsCount = 0;
   let disposableCount = 0;
+  let dummyCount = 0;
 
   for (const raw of lines) {
     // ⚡ सीधे रिजेक्ट करने के बजाय पहले .read और कचरा साफ़ करें
@@ -114,6 +134,7 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       continue;
     }
 
+    // 1. डिस्पोजेबल ईमेल चेक
     if (DISPOSABLE_DOMAINS.has(domain)) {
       disposableCount++;
       rejectedList.push({
@@ -124,6 +145,18 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       continue;
     }
 
+    // 2. डमी / प्लेसहोल्डर डोमेन चेक (जैसे info@email.com)
+    if (DUMMY_PLACEHOLDER_DOMAINS.has(domain)) {
+      dummyCount++;
+      rejectedList.push({
+        email: raw,
+        reason: "DUMMY_DOMAIN",
+        description: "Placeholder dummy domain rejected",
+      });
+      continue;
+    }
+
+    // 3. डुप्लीकेट चेक
     if (seen.has(email)) {
       duplicatesCount++;
       rejectedList.push({
@@ -147,6 +180,7 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
     duplicatesCount,
     syntaxErrorsCount,
     disposableCount,
+    dummyCount,
     noMxCount: 0,
     rejectedList,
   };
