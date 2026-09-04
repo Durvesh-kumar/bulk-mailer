@@ -90,6 +90,9 @@ export default function Home() {
   const [successCount, setSuccessCount] = useState<number>(0);
 
   const [loading, setLoading] = useState(false);
+  const [isDnsChecking, setIsDnsChecking] = useState(false);
+  const [dnsProgressText, setDnsProgressText] = useState("");
+  
   const [progressStatus, setProgressStatus] = useState<string>("");
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
   const [lastBatchMessage, setLastBatchMessage] = useState<string>("");
@@ -233,7 +236,8 @@ export default function Home() {
     else if (batchSize > maxLimit) setBatchSize(maxLimit);
   };
 
-  const handleAutoCleanLeads = () => {
+  // ⚡ बटन 1: क्विक क्लीन (लोकल सिंटैक्स + डुप्लिकेट्स तुरंत साफ़)
+  const handleQuickClean = () => {
     if (!rawSheetData.trim()) {
       alert("⚠️ Please paste your email leads list in the box first to clean!");
       return;
@@ -248,8 +252,82 @@ export default function Home() {
       temp: result.disposableCount,
     });
     if (result.rejectedCount > 0) setShowRejectedModal(true);
-    else if (result.validEmails.length > 0) alert(`✨ All ${result.validEmails.length} leads are 100% clean and valid!`);
+    else if (result.validEmails.length > 0) alert(`✨ Quick Clean Complete! ${result.validEmails.length} valid lead(s) found.`);
     else alert("❌ No valid email addresses found.");
+  };
+
+  // ⚡ बटन 2: डीप DNS MX चेकिंग (15-15 के बैच में सर्वर API पर कॉल + इनपुट बॉक्स से अमान्य को ऑटो रिमूव)
+  const handleDnsMxVerify = async () => {
+    if (!rawSheetData.trim()) {
+      alert("⚠️ Please clean or paste your leads first before running DNS check!");
+      return;
+    }
+
+    const preCleaned = cleanAndFilterLeads(rawSheetData);
+    if (preCleaned.validEmails.length === 0) {
+      alert("❌ No valid syntax emails found to verify via DNS.");
+      return;
+    }
+
+    const allToVerify = preCleaned.validEmails;
+    const CHUNK_SIZE = 15;
+    const verifiedValidEmails: string[] = [];
+    const newlyRejectedList: RejectedEmailItem[] = [...preCleaned.rejectedList];
+
+    setIsDnsChecking(true);
+
+    try {
+      for (let i = 0; i < allToVerify.length; i += CHUNK_SIZE) {
+        const chunk = allToVerify.slice(i, i + CHUNK_SIZE);
+        const processedSoFar = Math.min(i + CHUNK_SIZE, allToVerify.length);
+
+        setDnsProgressText(`🌐 DNS MX Checking: ${processedSoFar} / ${allToVerify.length} leads...`);
+
+        const res = await fetch("/api/verify-dns", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ emails: chunk }),
+        });
+
+        if (!res.ok) {
+          throw new Error("DNS API request failed on batch");
+        }
+
+        const data: {
+          valid: string[];
+          invalid: { email: string; reason: any; description: string }[];
+        } = await res.json();
+
+        verifiedValidEmails.push(...data.valid);
+
+        if (data.invalid && data.invalid.length > 0) {
+          newlyRejectedList.push(...data.invalid);
+        }
+      }
+
+      setRawSheetData(verifiedValidEmails.join("\n"));
+      setRejectedData(newlyRejectedList);
+
+      const noMxCount = newlyRejectedList.filter((r) => r.reason === "NO_MX_RECORD").length;
+      setRejectedStats({
+        total: newlyRejectedList.length,
+        dups: preCleaned.duplicatesCount,
+        syntax: preCleaned.syntaxErrorsCount,
+        temp: preCleaned.disposableCount + noMxCount,
+      });
+
+      if (newlyRejectedList.length > 0) {
+        setShowRejectedModal(true);
+      } else {
+        alert(`✨ All ${verifiedValidEmails.length} leads passed DNS MX verification!`);
+      }
+    } catch (err) {
+      console.error("DNS Verify Loop Error:", err);
+      alert("An error occurred during DNS batch verification.");
+    } finally {
+      setIsDnsChecking(false);
+      setDnsProgressText("");
+    }
   };
 
   const handleCopyFailedDetailed = () => {
@@ -561,7 +639,6 @@ export default function Home() {
         const updatedTotalSuccess = currentSuccess + batchSuccessCount;
         const updatedRounds = roundsDone + 1;
 
-        // ⚡ THROTTLED STATE UPDATE: React State updates only every 10 leads or when batch completes
         if (
           updatedTotalProcessed - lastRenderedProcessedRef.current >= 10 ||
           remainingQueue.length === 0
@@ -995,18 +1072,40 @@ export default function Home() {
               </div>
 
               <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg flex-1 flex flex-col">
-                <div className="flex justify-between items-center">
+                <div className="flex justify-between items-center flex-wrap gap-2">
                   <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
                     <img src="/icons/target-lead.svg" alt="Target" className="w-3.5 h-3.5 object-contain" />
                     Target Leads Box
                   </label>
-                  <div className="flex items-center gap-1">
+                  
+                  {/* ⚡ दो अलग-अलग बटन: Quick Clean और Run DNS MX Check */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       type="button"
-                      onClick={handleAutoCleanLeads}
-                      className="px-2.5 py-0.5 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                      onClick={handleQuickClean}
+                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
                     >
-                      ✨ Auto Clean
+                      ✨ Quick Clean
+                    </button>
+                    <button
+                      type="button"
+                      disabled={ isDnsChecking || loading}
+                      onClick={handleDnsMxVerify}
+                      className="px-2.5 py-1 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                    >
+                      {
+                        isDnsChecking ? (
+                          <>
+                            <span className="w-3 h-3 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin"/>
+                            <span>{dnsProgressText || "Checking DNS MX records..."}</span>
+                          </>
+                        ) : (
+                          <>
+                            <span>🌐</span> Run DNS MX Check
+                          </>
+                          
+                        )
+                      }
                     </button>
                     {rejectedData.length > 0 && (
                       <button
@@ -1170,7 +1269,7 @@ export default function Home() {
         ) : (
           /* STEP 2: Live Rotation Dashboard */
           <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
-            {/* ⚡ DYNAMIC ACTION BAR (Add Leads & Switch Senders without resetting campaign) */}
+            {/* ⚡ DYNAMIC ACTION BAR */}
             <div className="bg-slate-950 border border-indigo-500/30 p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-3 shadow-inner">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-bold text-indigo-300">⚡ Dynamic Quick Actions:</span>

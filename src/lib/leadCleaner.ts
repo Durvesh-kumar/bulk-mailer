@@ -18,7 +18,7 @@ const EMAIL_STRICT_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
 export interface RejectedEmailItem {
   email: string;
-  reason: "INVALID_SYNTAX" | "DUPLICATE" | "DISPOSABLE_DOMAIN" | "NO_MX_RECORD";
+  reason: "INVALID_SYNTAX" | "DUPLICATE" | "DISPOSABLE_DOMAIN" | "NO_MX_RECORD" | string;
   description: string;
 }
 
@@ -65,7 +65,7 @@ export function sanitizeEmailString(rawInput: string): string | null {
 }
 
 // =========================================================================
-// 2. आपका सिंक्रोनस मेथड (ब्राउज़र / फ्रंटएंड के लिए 100% सेफ - नो DNS क्रैश)
+// 2. आपका सिंक्रोनस मेथड (ब्राउज़र / क्लाइंट के लिए 100% सेफ - नो बंडल एरर)
 // =========================================================================
 export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
   const lines = rawInput.split(/[\n,;\t]+/).map((l) => l.trim()).filter(Boolean);
@@ -148,82 +148,6 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
     syntaxErrorsCount,
     disposableCount,
     noMxCount: 0,
-    rejectedList,
-  };
-}
-
-// =========================================================================
-// 3. DNS MX कैशे और बैकएंड मेथड (सिर्फ सर्वर/API पर चलेगा, Vercel-सेफ)
-// =========================================================================
-const domainMxCache = new Map<string, boolean>();
-
-export async function resolveMxWithTimeout(domain: string, timeoutMs = 2500): Promise<boolean> {
-  if (domainMxCache.has(domain)) {
-    return domainMxCache.get(domain)!;
-  }
-
-  try {
-    // ⚡ Dynamic Import: इससे फ्रंटएंड बंडल में DNS इम्पोर्ट होने का डर खत्म
-    const dns = await import("dns");
-
-    const dnsPromise = dns.promises.resolveMx(domain)
-      .then((records) => Boolean(records && records.length > 0))
-      .catch(() => false);
-
-    const timeoutPromise = new Promise<boolean>((resolve) =>
-      setTimeout(() => resolve(false), timeoutMs)
-    );
-
-    const isValid = await Promise.race([dnsPromise, timeoutPromise]);
-    domainMxCache.set(domain, isValid);
-    return isValid;
-  } catch {
-    domainMxCache.set(domain, false);
-    return false;
-  }
-}
-
-export async function cleanAndFilterLeadsWithDns(rawInput: string): Promise<CleanLeadsResult> {
-  const initialResult = cleanAndFilterLeads(rawInput);
-  
-  const finalValidEmails: string[] = [];
-  const rejectedList: RejectedEmailItem[] = [...initialResult.rejectedList];
-  let noMxCount = 0;
-
-  // 15-15 के बैच में चंकिंग (Vercel 60s के अंदर 2000 डेटा आसानी से प्रोसेस होगा)
-  const BATCH_SIZE = 15;
-  for (let i = 0; i < initialResult.validEmails.length; i += BATCH_SIZE) {
-    const batch = initialResult.validEmails.slice(i, i + BATCH_SIZE);
-
-    await Promise.all(
-      batch.map(async (email) => {
-        const domain = email.split("@")[1];
-        const hasMx = await resolveMxWithTimeout(domain);
-
-        if (hasMx) {
-          finalValidEmails.push(email);
-        } else {
-          noMxCount++;
-          rejectedList.push({
-            email,
-            reason: "NO_MX_RECORD",
-            description: "Domain does not exist or has no active mail server (NXDOMAIN)",
-          });
-        }
-      })
-    );
-  }
-
-  return {
-    cleanedText: finalValidEmails.join("\n"),
-    validEmails: finalValidEmails,
-    totalRaw: initialResult.totalRaw,
-    validCount: finalValidEmails.length,
-    rejectedCount: rejectedList.length,
-    duplicatesCount: initialResult.duplicatesCount,
-    syntaxErrorsCount: initialResult.syntaxErrorsCount,
-    disposableCount: initialResult.disposableCount,
-    noMxCount,
     rejectedList,
   };
 }
