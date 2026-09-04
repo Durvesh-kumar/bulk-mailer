@@ -69,6 +69,15 @@ export default function Home() {
   const senderProcessedTimesRef = useRef<Record<string, string>>({});
   const completedSendersCountRef = useRef<number>(0);
 
+  // ⚡ HYBRID DIRECT DOM REFS & THROTTLING REFS (0% CPU LAG ON 4,000+ LEADS)
+  const domProcessedCountRef = useRef<HTMLSpanElement>(null);
+  const domDeliveredCountRef = useRef<HTMLSpanElement>(null);
+  const domFailedCountRef = useRef<HTMLSpanElement>(null);
+  const domLiveStatusRef = useRef<HTMLParagraphElement>(null);
+
+  const lastRenderedProcessedRef = useRef<number>(0);
+  const lastRenderedDeliveredRef = useRef<number>(0);
+
   useEffect(() => { subjectRef.current = subject; }, [subject]);
   useEffect(() => { templateRef.current = template; }, [template]);
   useEffect(() => { customSignoffNameRef.current = customSignoffName; }, [customSignoffName]);
@@ -93,6 +102,11 @@ export default function Home() {
   const [showFailedModal, setShowFailedModal] = useState(false);
   const [copiedType, setCopiedType] = useState<"DETAILED" | "EMAILS" | null>(null);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
+
+  // ⚡ DYNAMIC REFILL & FOLDER SWITCH MODALS
+  const [isAppendModalOpen, setIsAppendModalOpen] = useState(false);
+  const [appendLeadInput, setAppendLeadInput] = useState("");
+  const [selectedFolderToSwitch, setSelectedFolderToSwitch] = useState<ProfileTier>("YEAR_2");
 
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
@@ -136,6 +150,74 @@ export default function Home() {
       setLoading(false);
       setProgressStatus("");
     }
+  };
+
+  // ⚡ DYNAMIC SENDER FOLDER SWITCHING HANDLER
+  const handleSwitchSenderFolderDirectly = async (tierToSwitch: ProfileTier) => {
+    if (!machineId) return;
+    setLoading(true);
+    setProgressStatus(`Switching Senders to folder ${TIER_META[tierToSwitch]?.label || tierToSwitch}...`);
+    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
+    try {
+      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}&tier=${tierToSwitch}`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json", "x-session-token": savedSession },
+      });
+
+      const data = await res.json();
+      if (data.accounts && data.accounts.length > 0) {
+        const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tierToSwitch);
+        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email, acc.lastSentAt));
+
+        if (availableAccounts.length > 0) {
+          setInMemorySenders(availableAccounts);
+          setCurrentSenderIndex(0);
+          setSenderEmail(availableAccounts[0].email);
+          setAppPassword(availableAccounts[0].appPassword);
+          setSenderName(availableAccounts[0].senderName || "Colleague");
+          setSelectedTier(tierToSwitch);
+          if (TIER_META[tierToSwitch]?.modeMap) {
+            setAccountAgeMode(TIER_META[tierToSwitch].modeMap);
+          }
+          setIsVaultLoaded(true);
+          alert(`✅ Successfully switched sender folder to ${TIER_META[tierToSwitch]?.label || tierToSwitch} (${availableAccounts.length} active senders loaded)!`);
+        } else {
+          alert(`⚠️ All accounts in ${TIER_META[tierToSwitch]?.label || tierToSwitch} are under 24h cooldown!`);
+        }
+      } else {
+        alert(`No accounts registered under ${TIER_META[tierToSwitch]?.label || tierToSwitch} in your Vault.`);
+      }
+    } catch {
+      alert("Failed to switch sender folder.");
+    } finally {
+      setLoading(false);
+      setProgressStatus("");
+    }
+  };
+
+  // ⚡ APPEND NEW LEADS DYNAMICALLY WITHOUT RESETING PROGRESS
+  const handleAppendMoreLeads = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!appendLeadInput.trim()) return;
+
+    const result = cleanAndFilterLeads(appendLeadInput);
+    if (result.validEmails.length === 0) {
+      alert("⚠️ No valid email addresses found in your input text.");
+      return;
+    }
+
+    setPendingEmails((prevQueue) => {
+      const combined = [...prevQueue, ...result.validEmails];
+      const uniqueQueue = Array.from(new Set(combined));
+      localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(uniqueQueue));
+      return uniqueQueue;
+    });
+
+    setInitialTotalCount((prev) => prev + result.validEmails.length);
+    setAppendLeadInput("");
+    setIsAppendModalOpen(false);
+    alert(`✅ Successfully added ${result.validEmails.length} new clean lead(s) to the active running queue!`);
   };
 
   const handleBatchSizeChange = (val: string) => {
@@ -240,6 +322,13 @@ export default function Home() {
     completedSendersCountRef.current = 0;
     activeSenders.forEach(s => { senderSentCountRef.current[s.email.toLowerCase()] = 0; });
 
+    lastRenderedProcessedRef.current = 0;
+    lastRenderedDeliveredRef.current = 0;
+
+    if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = "0";
+    if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = "0";
+    if (domFailedCountRef.current) domFailedCountRef.current.innerText = "0";
+
     setPendingEmails(result.validEmails);
     setInitialTotalCount(result.validEmails.length);
     setProcessedCount(0);
@@ -281,6 +370,11 @@ export default function Home() {
     if (isStopRequestedRef.current || currentQueue.length === 0 || sendersList.length === 0) {
       setLoading(false);
       setProgressStatus("");
+
+      setProcessedCount(currentProcessed);
+      setSuccessCount(currentSuccess);
+      lastRenderedProcessedRef.current = currentProcessed;
+      lastRenderedDeliveredRef.current = currentSuccess;
 
       if (currentQueue.length === 0 || sendersList.length === 0) {
         let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
@@ -343,7 +437,12 @@ export default function Home() {
         const chunk = batchToSend.slice(i, i + activeChunkSize);
         const currentCountDisplay = currentSenderCurrentSent + batchProcessedCount + chunk.length;
 
-        setProgressStatus(`[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching ${chunk.length} email(s)...`);
+        const liveText = `[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching ${chunk.length} email(s)...`;
+        if (domLiveStatusRef.current) {
+          domLiveStatusRef.current.innerText = liveText;
+        } else {
+          setProgressStatus(liveText);
+        }
 
         const res = await fetch("/api/send-campaign", {
           method: "POST",
@@ -429,11 +528,27 @@ export default function Home() {
           }));
 
         if (newlyFailed.length > 0) {
-          setFailedLeadsList((prev) => [...prev, ...newlyFailed]);
+          setFailedLeadsList((prev) => {
+            const updated = [...prev, ...newlyFailed];
+            if (domFailedCountRef.current) {
+              domFailedCountRef.current.innerText = String(updated.length);
+            }
+            return updated;
+          });
         }
         
         batchProcessedCount += chunk.length;
         batchSuccessCount += chunkSuccess;
+
+        // ⚡ INSTANT DIRECT DOM COUNTER UPDATE (0% Virtual DOM Re-render overhead)
+        const instantProcessed = currentProcessed + batchProcessedCount;
+        const instantSuccess = currentSuccess + batchSuccessCount;
+        if (domProcessedCountRef.current) {
+          domProcessedCountRef.current.innerText = String(instantProcessed);
+        }
+        if (domDeliveredCountRef.current) {
+          domDeliveredCountRef.current.innerText = String(instantSuccess);
+        }
       }
 
       if (!isStopRequestedRef.current && !fallbackTriggered) {
@@ -446,9 +561,18 @@ export default function Home() {
         const updatedTotalSuccess = currentSuccess + batchSuccessCount;
         const updatedRounds = roundsDone + 1;
 
+        // ⚡ THROTTLED STATE UPDATE: React State updates only every 10 leads or when batch completes
+        if (
+          updatedTotalProcessed - lastRenderedProcessedRef.current >= 10 ||
+          remainingQueue.length === 0
+        ) {
+          setProcessedCount(updatedTotalProcessed);
+          setSuccessCount(updatedTotalSuccess);
+          lastRenderedProcessedRef.current = updatedTotalProcessed;
+          lastRenderedDeliveredRef.current = updatedTotalSuccess;
+        }
+
         setPendingEmails(remainingQueue);
-        setProcessedCount(updatedTotalProcessed);
-        setSuccessCount(updatedTotalSuccess);
         setSendersUsedRounds(updatedRounds);
 
         if (remainingQueue.length > 0) {
@@ -611,6 +735,11 @@ export default function Home() {
       senderSentCountRef.current = {};
       senderProcessedTimesRef.current = {};
       completedSendersCountRef.current = 0;
+      lastRenderedProcessedRef.current = 0;
+      lastRenderedDeliveredRef.current = 0;
+      if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = "0";
+      if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = "0";
+      if (domFailedCountRef.current) domFailedCountRef.current.innerText = "0";
       localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
     }
   };
@@ -649,7 +778,7 @@ export default function Home() {
     ? (totalAccountsCount - (currentSenderIndex % totalAccountsCount)) 
     : 0;
 
-  return (
+    return (
     <main className="min-h-screen bg-slate-950 text-slate-100 py-5 px-3 sm:px-6 font-sans selection:bg-indigo-500 selection:text-white">
       <div className="max-w-7xl mx-auto space-y-4">
         <ReferralBanner />
@@ -668,7 +797,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* 🎯 Updated Action Bar with Lead Dashboard Route */}
           <div className="flex items-center gap-2">
             <Link
               href="/outlook/dashboard"
@@ -720,11 +848,15 @@ export default function Home() {
           </div>
           <div className="bg-slate-950/80 p-2.5 rounded-xl border border-indigo-500/20 text-center">
             <span className="text-[9px] text-indigo-400 uppercase font-black block">Processed</span>
-            <p className="text-base font-black text-indigo-400 font-mono">{processedCount}</p>
+            <p className="text-base font-black text-indigo-400 font-mono">
+              <span ref={domProcessedCountRef}>{processedCount}</span>
+            </p>
           </div>
           <div className="bg-slate-950/80 p-2.5 rounded-xl border border-emerald-500/20 text-center">
             <span className="text-[9px] text-emerald-400 uppercase font-black block">Delivered</span>
-            <p className="text-base font-black text-emerald-400 font-mono">{successCount}</p>
+            <p className="text-base font-black text-emerald-400 font-mono">
+              <span ref={domDeliveredCountRef}>{successCount}</span>
+            </p>
           </div>
           <div 
             onClick={() => failedLeadsList.length > 0 && setShowFailedModal(true)}
@@ -737,7 +869,9 @@ export default function Home() {
             <span className="text-[9px] text-rose-400 uppercase font-black block">
               Failed {failedLeadsList.length > 0 && "👁️"}
             </span>
-            <p className="text-base font-black text-rose-400 font-mono">{failedLeadsList.length}</p>
+            <p className="text-base font-black text-rose-400 font-mono">
+              <span ref={domFailedCountRef}>{failedLeadsList.length}</span>
+            </p>
           </div>
         </div>
 
@@ -746,7 +880,9 @@ export default function Home() {
           <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-2.5 rounded-2xl flex items-center justify-between shadow-xl animate-pulse">
             <div className="flex items-center gap-3">
               <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
-              <p className="text-xs font-mono text-indigo-300 font-bold">{progressStatus}</p>
+              <p ref={domLiveStatusRef} className="text-xs font-mono text-indigo-300 font-bold">
+                {progressStatus || "Dispatching Running..."}
+              </p>
             </div>
             <button
               type="button"
@@ -1034,6 +1170,39 @@ export default function Home() {
         ) : (
           /* STEP 2: Live Rotation Dashboard */
           <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
+            {/* ⚡ DYNAMIC ACTION BAR (Add Leads & Switch Senders without resetting campaign) */}
+            <div className="bg-slate-950 border border-indigo-500/30 p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-3 shadow-inner">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-indigo-300">⚡ Dynamic Quick Actions:</span>
+                <button
+                  type="button"
+                  onClick={() => setIsAppendModalOpen(true)}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition shadow-sm cursor-pointer flex items-center gap-1"
+                >
+                  <span>➕</span> Add More Leads
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-300">Switch Sender Folder:</span>
+                <select
+                  value={selectedFolderToSwitch}
+                  onChange={(e) => {
+                    const tier = e.target.value as ProfileTier;
+                    setSelectedFolderToSwitch(tier);
+                    handleSwitchSenderFolderDirectly(tier);
+                  }}
+                  className="bg-slate-900 text-indigo-300 font-bold text-xs px-3 py-1.5 rounded-lg border border-indigo-500/40 outline-none cursor-pointer"
+                >
+                  {(Object.keys(TIER_META) as ProfileTier[]).map((tier) => (
+                    <option key={tier} value={tier}>
+                      {TIER_META[tier]?.label || tier}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
             {remainingCount > 0 ? (
               <form onSubmit={handleResumeOrNextBatch} className="space-y-4 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
                 <div className="flex flex-wrap justify-between items-center border-b border-slate-800 pb-3 gap-2">
@@ -1168,12 +1337,60 @@ export default function Home() {
               </form>
             ) : (
               <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-xl font-bold text-xs shadow-inner flex items-center justify-center gap-2">
-                <span>🎉</span> All leads have been processed successfully!
+                <span>🎉</span> All leads have been processed successfully! You can add more leads above anytime.
               </div>
             )}
           </div>
         )}
       </div>
+
+      {/* ⚡ MODAL FOR ADDING MORE LEADS ON THE FLY */}
+      {isAppendModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
+          <div className="bg-slate-900 border border-indigo-500/40 w-full max-w-lg rounded-3xl p-6 shadow-2xl space-y-4">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
+              <h3 className="text-sm font-black text-indigo-300 uppercase tracking-wider flex items-center gap-2">
+                <span>➕</span> Add More Leads to Running Queue
+              </h3>
+              <button
+                onClick={() => setIsAppendModalOpen(false)}
+                className="text-slate-400 hover:text-white text-sm bg-slate-800 px-2.5 py-1 rounded-lg cursor-pointer"
+              >
+                ✕ Close
+              </button>
+            </div>
+
+            <form onSubmit={handleAppendMoreLeads} className="space-y-3">
+              <p className="text-xs text-slate-400">
+                Paste your new lead emails below. They will be automatically sanitized, checked, and appended directly to your active queue without losing any progress or resetting counts!
+              </p>
+              <textarea
+                required
+                rows={6}
+                value={appendLeadInput}
+                onChange={(e) => setAppendLeadInput(e.target.value)}
+                placeholder="newlead1@example.com&#10;newlead2@example.com"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500 resize-none"
+              />
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAppendModalOpen(false)}
+                  className="px-4 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs font-bold cursor-pointer hover:bg-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-lg"
+                >
+                  Append Leads
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       <RejectedLeadsModal
         isOpen={showRejectedModal}
