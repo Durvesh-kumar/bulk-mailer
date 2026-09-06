@@ -48,7 +48,9 @@ export default function Home() {
   // Campaign Form State
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
-  const [subject, setSubject] = useState("");
+  
+  // ⚡ MULTI-SUBJECT STATE (Min 1, Max 5)
+  const [subjectList, setSubjectList] = useState<string[]>([""]);
   const [template, setTemplate] = useState("");
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
@@ -59,7 +61,10 @@ export default function Home() {
 
   // Live Mutable Refs
   const isStopRequestedRef = useRef(false);
-  const subjectRef = useRef("");
+  const subjectListRef = useRef<string[]>([""]);
+  const lastDispatchedSubjectRef = useRef<string>("");
+  const lotSubjectLockRef = useRef<{ senderEmail: string; subject: string } | null>(null);
+
   const templateRef = useRef("");
   const customSignoffNameRef = useRef("");
   const rotationModeRef = useRef<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
@@ -78,7 +83,7 @@ export default function Home() {
   const lastRenderedProcessedRef = useRef<number>(0);
   const lastRenderedDeliveredRef = useRef<number>(0);
 
-  useEffect(() => { subjectRef.current = subject; }, [subject]);
+  useEffect(() => { subjectListRef.current = subjectList; }, [subjectList]);
   useEffect(() => { templateRef.current = template; }, [template]);
   useEffect(() => { customSignoffNameRef.current = customSignoffName; }, [customSignoffName]);
   useEffect(() => { rotationModeRef.current = rotationMode; }, [rotationMode]);
@@ -110,6 +115,84 @@ export default function Home() {
   const [isAppendModalOpen, setIsAppendModalOpen] = useState(false);
   const [appendLeadInput, setAppendLeadInput] = useState("");
   const [selectedFolderToSwitch, setSelectedFolderToSwitch] = useState<ProfileTier>("YEAR_2");
+
+  // 🎯 SUBJECT ROTATION & NO-REPEAT CORE ENGINE (NO DEFAULT FALLBACK)
+  const getNextSubjectForDispatch = (currentSenderEmail: string): string => {
+    const rawList = subjectListRef.current;
+    // सिर्फ वही सब्जेक्ट्स उठाओ जो आपने खुद टाइप किए हैं
+    const cleanList = rawList.map((s) => s.trim()).filter((s) => s.length > 0);
+
+    // ⚡ कड़ा नियम: अगर कोई सब्जेक्ट नहीं मिला तो डिफ़ॉल्ट कभी मत लगाओ, सीधे एरर थ्रो करो
+    if (cleanList.length === 0) {
+      throw new Error("Subject line is missing! Please enter a valid subject line.");
+    }
+
+    if (cleanList.length === 1) {
+      lastDispatchedSubjectRef.current = cleanList[0];
+      return cleanList[0];
+    }
+
+    // Method A: Lot Mode (EVERY_SINGLE_SENDER) - पूरे लॉट के लिए सेम, नए लॉट पर डिफरेंट
+    if (rotationModeRef.current === "EVERY_SINGLE_SENDER") {
+      if (
+        lotSubjectLockRef.current &&
+        lotSubjectLockRef.current.senderEmail.toLowerCase() === currentSenderEmail.toLowerCase() &&
+        lotSubjectLockRef.current.subject &&
+        cleanList.includes(lotSubjectLockRef.current.subject)
+      ) {
+        return lotSubjectLockRef.current.subject;
+      }
+
+      const previousSubject = lastDispatchedSubjectRef.current;
+      let available = cleanList.filter((s) => s !== previousSubject);
+      if (available.length === 0) available = cleanList;
+
+      let chosen: string;
+      if (cleanList.length === 2) {
+        chosen = cleanList[0] === previousSubject ? cleanList[1] : cleanList[0];
+      } else {
+        chosen = available[Math.floor(Math.random() * available.length)];
+      }
+
+      lotSubjectLockRef.current = { senderEmail: currentSenderEmail, subject: chosen };
+      lastDispatchedSubjectRef.current = chosen;
+      return chosen;
+    }
+
+    // Method B: Rotation Mode (CONTINUOUS / EVERY_N_SENDERS) - प्रत्येक मेल पर नो-रिपीट चेंज
+    const previousSubject = lastDispatchedSubjectRef.current;
+    let chosen: string;
+
+    if (cleanList.length === 2) {
+      chosen = cleanList[0] === previousSubject ? cleanList[1] : cleanList[0];
+    } else {
+      const candidates = cleanList.filter((s) => s !== previousSubject);
+      chosen = candidates.length > 0
+        ? candidates[Math.floor(Math.random() * candidates.length)]
+        : cleanList[0];
+    }
+
+    lastDispatchedSubjectRef.current = chosen;
+    return chosen;
+  };
+  // ⚡ UI Handlers for Subject Lines
+  const handleAddSubjectField = () => {
+    if (subjectList.length < 5) {
+      setSubjectList([...subjectList, ""]);
+    }
+  };
+
+  const handleRemoveSubjectField = (indexToRemove: number) => {
+    if (subjectList.length > 1) {
+      setSubjectList(subjectList.filter((_, idx) => idx !== indexToRemove));
+    }
+  };
+
+  const handleSubjectTextChange = (index: number, val: string) => {
+    const updated = [...subjectList];
+    updated[index] = val;
+    setSubjectList(updated);
+  };
 
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
@@ -155,7 +238,6 @@ export default function Home() {
     }
   };
 
-  // ⚡ DYNAMIC SENDER FOLDER SWITCHING HANDLER
   const handleSwitchSenderFolderDirectly = async (tierToSwitch: ProfileTier) => {
     if (!machineId) return;
     setLoading(true);
@@ -199,7 +281,6 @@ export default function Home() {
     }
   };
 
-  // ⚡ APPEND NEW LEADS DYNAMICALLY WITHOUT RESETING PROGRESS
   const handleAppendMoreLeads = (e: React.FormEvent) => {
     e.preventDefault();
     if (!appendLeadInput.trim()) return;
@@ -236,7 +317,6 @@ export default function Home() {
     else if (batchSize > maxLimit) setBatchSize(maxLimit);
   };
 
-  // ⚡ बटन 1: क्विक क्लीन (लोकल सिंटैक्स + डुप्लिकेट्स तुरंत साफ़)
   const handleQuickClean = () => {
     if (!rawSheetData.trim()) {
       alert("⚠️ Please paste your email leads list in the box first to clean!");
@@ -256,7 +336,6 @@ export default function Home() {
     else alert("❌ No valid email addresses found.");
   };
 
-  // ⚡ बटन 2: डीप DNS MX चेकिंग (15-15 के बैच में सर्वर API पर कॉल + इनपुट बॉक्स से अमान्य को ऑटो रिमूव)
   const handleDnsMxVerify = async () => {
     if (!rawSheetData.trim()) {
       alert("⚠️ Please clean or paste your leads first before running DNS check!");
@@ -368,6 +447,12 @@ export default function Home() {
       return;
     }
 
+    const hasAtLeastOneSubject = subjectList.some((s) => s.trim().length > 0);
+    if (!hasAtLeastOneSubject) {
+      alert("Please enter at least one Subject Line!");
+      return;
+    }
+
     if (!senderEmail || !senderName) {
       alert("Please enter Sender Email and Display Name!");
       return;
@@ -398,6 +483,8 @@ export default function Home() {
     senderSentCountRef.current = {};
     senderProcessedTimesRef.current = {};
     completedSendersCountRef.current = 0;
+    lastDispatchedSubjectRef.current = "";
+    lotSubjectLockRef.current = null;
     activeSenders.forEach(s => { senderSentCountRef.current[s.email.toLowerCase()] = 0; });
 
     lastRenderedProcessedRef.current = 0;
@@ -515,7 +602,10 @@ export default function Home() {
         const chunk = batchToSend.slice(i, i + activeChunkSize);
         const currentCountDisplay = currentSenderCurrentSent + batchProcessedCount + chunk.length;
 
-        const liveText = `[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching ${chunk.length} email(s)...`;
+        // 🎯 DYNAMIC NO-REPEAT SUBJECT RESOLUTION
+        const activeSubject = getNextSubjectForDispatch(activeEmail);
+
+        const liveText = `[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching ${chunk.length} email(s) with Subject: "${activeSubject.substring(0, 25)}..."`;
         if (domLiveStatusRef.current) {
           domLiveStatusRef.current.innerText = liveText;
         } else {
@@ -530,7 +620,7 @@ export default function Home() {
             senderEmail: activeEmail.trim().toLowerCase(),
             appPassword: activePass.replace(/\s+/g, ""),
             recipients: chunk,
-            subject: subjectRef.current.trim(),
+            subject: activeSubject,
             template: templateRef.current.trim(),
             customSignoffName: customSignoffNameRef.current.trim(),
             accountAgeMode: mode,
@@ -668,6 +758,7 @@ export default function Home() {
           senderJustCompletedLot = true;
           markSenderLotCompleted(activeEmail);
           completedSendersCountRef.current += 1;
+          lotSubjectLockRef.current = null; // ⚡ Reset lock for next lot
           activePool = sendersList.filter(s => s.email.toLowerCase() !== activeEmail.toLowerCase());
           setInMemorySenders(activePool);
         } else {
@@ -800,7 +891,7 @@ export default function Home() {
       setCurrentSenderIndex(0);
       setFailedLeadsList([]);
       setRawSheetData("");
-      setSubject("");
+      setSubjectList([""]);
       setTemplate("");
       setCustomSignoffName("");
       setSenderEmail("");
@@ -812,6 +903,8 @@ export default function Home() {
       senderSentCountRef.current = {};
       senderProcessedTimesRef.current = {};
       completedSendersCountRef.current = 0;
+      lastDispatchedSubjectRef.current = "";
+      lotSubjectLockRef.current = null;
       lastRenderedProcessedRef.current = 0;
       lastRenderedDeliveredRef.current = 0;
       if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = "0";
@@ -1078,7 +1171,6 @@ export default function Home() {
                     Target Leads Box
                   </label>
                   
-                  {/* ⚡ दो अलग-अलग बटन: Quick Clean और Run DNS MX Check */}
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       type="button"
@@ -1089,23 +1181,20 @@ export default function Home() {
                     </button>
                     <button
                       type="button"
-                      disabled={ isDnsChecking || loading}
+                      disabled={isDnsChecking || loading}
                       onClick={handleDnsMxVerify}
                       className="px-2.5 py-1 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
                     >
-                      {
-                        isDnsChecking ? (
-                          <>
-                            <span className="w-3 h-3 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin"/>
-                            <span>{dnsProgressText || "Checking DNS MX records..."}</span>
-                          </>
-                        ) : (
-                          <>
-                            <span>🌐</span> Run DNS MX Check
-                          </>
-                          
-                        )
-                      }
+                      {isDnsChecking ? (
+                        <>
+                          <span className="w-3 h-3 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin"/>
+                          <span>{dnsProgressText || "Checking DNS MX records..."}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>🌐</span> Run DNS MX Check
+                        </>
+                      )}
                     </button>
                     {rejectedData.length > 0 && (
                       <button
@@ -1204,15 +1293,60 @@ export default function Home() {
                   )}
                 </div>
 
-                <InputField
-                  label="Subject Line"
-                  type="text"
-                  required
-                  disabled={loading}
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                  placeholder="e.g. Quick question regarding partnership"
-                />
+                {/* ⚡ DYNAMIC MULTI-SUBJECT UI (Min 1, Max 5) */}
+                <div className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl space-y-2.5">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[11px] font-bold text-indigo-300 flex items-center gap-1.5">
+                      <span>🎯</span> Subject Line Rotation (No-Repeat Random / Lot Guard)
+                    </label>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {subjectList.length} / 5 Slots
+                    </span>
+                  </div>
+
+                  <div className="space-y-2">
+                    {subjectList.map((sub, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono text-slate-500 w-4">{idx + 1}.</span>
+                        <input
+                          type="text"
+                          required={idx === 0}
+                          disabled={loading}
+                          value={sub}
+                          onChange={(e) => handleSubjectTextChange(idx, e.target.value)}
+                          placeholder={
+                            idx === 0
+                              ? "e.g. Quick question regarding partnership"
+                              : `Optional alternative subject ${idx + 1}`
+                          }
+                          className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-600 outline-none focus:border-indigo-500"
+                        />
+                        {subjectList.length > 1 && (
+                          <button
+                            type="button"
+                            disabled={loading}
+                            onClick={() => handleRemoveSubjectField(idx)}
+                            className="p-2 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition text-xs font-bold cursor-pointer"
+                            title="Remove Subject Line"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {subjectList.length < 5 && (
+                    <button
+                      type="button"
+                      disabled={loading}
+                      onClick={handleAddSubjectField}
+                      className="text-[11px] font-bold text-indigo-400 hover:text-indigo-300 transition flex items-center gap-1 cursor-pointer pt-1"
+                    >
+                      <span>➕</span> Add Another Subject Line ({subjectList.length}/5)
+                    </button>
+                  )}
+                </div>
 
                 <div className="space-y-1">
                   <div className="flex justify-between items-center">
@@ -1385,24 +1519,60 @@ export default function Home() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-                  <InputField
-                    label="✏️ Live Subject Line (Updates instantly on next send)"
-                    type="text"
-                    value={subject}
-                    onChange={(e) => setSubject(e.target.value)}
-                    className="bg-slate-900 border-slate-700"
-                  />
+                {/* ⚡ LIVE SUBJECT LINES (1-5) IN DASHBOARD */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex justify-between items-center">
+                    <label className="text-[10px] text-slate-300 font-bold flex items-center gap-1">
+                      <span>✏️</span> Live Subject Lines (Rotates with No-Repeat between 1 to 5)
+                    </label>
+                    <span className="text-[9px] font-mono text-slate-500">
+                      {subjectList.length} Active Slots
+                    </span>
+                  </div>
 
-                  <InputField
-                    label="✏️ Live Sign-off / Signature"
-                    type="text"
-                    value={customSignoffName}
-                    onChange={(e) => setCustomSignoffName(e.target.value)}
-                    accentColor="emerald"
-                    className="bg-slate-900 border-slate-700"
-                  />
+                  <div className="space-y-1.5">
+                    {subjectList.map((sub, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono text-slate-500 w-4">{idx + 1}.</span>
+                        <input
+                          type="text"
+                          value={sub}
+                          onChange={(e) => handleSubjectTextChange(idx, e.target.value)}
+                          placeholder={`Subject Line ${idx + 1}`}
+                          className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-100 outline-none focus:border-indigo-500"
+                        />
+                        {subjectList.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSubjectField(idx)}
+                            className="p-1.5 text-slate-400 hover:text-rose-400 text-xs font-bold cursor-pointer"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {subjectList.length < 5 && (
+                    <button
+                      type="button"
+                      onClick={handleAddSubjectField}
+                      className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition flex items-center gap-1 cursor-pointer pt-0.5"
+                    >
+                      <span>➕</span> Add Another Subject ({subjectList.length}/5)
+                    </button>
+                  )}
                 </div>
+
+                <InputField
+                  label="✏️ Live Sign-off / Signature"
+                  type="text"
+                  value={customSignoffName}
+                  onChange={(e) => setCustomSignoffName(e.target.value)}
+                  accentColor="emerald"
+                  className="bg-slate-900 border-slate-700"
+                />
 
                 <div className="w-full space-y-1">
                   <div className="flex justify-between items-center">
@@ -1562,7 +1732,8 @@ export default function Home() {
         isOpen={showPreviewModal}
         onClose={() => setShowPreviewModal(false)}
         template={template}
-        subject={subject}
+        subject={subjectList[0] || ""}
+        subjects={subjectList}
         senderName={senderName}
         customSignoffName={customSignoffName}
       />

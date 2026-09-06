@@ -1,14 +1,15 @@
 // src/components/modals/SpintaxPreviewModal.tsx
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { GREETINGS, OPENERS, SIGN_OFFS } from "@/lib/ctaConfig";
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   template: string;
-  subject: string;
+  subject?: string;
+  subjects?: string[];
   senderName: string;
   customSignoffName: string;
 }
@@ -18,23 +19,23 @@ export default function SpintaxPreviewModal({
   onClose,
   template,
   subject,
+  subjects,
   senderName,
   customSignoffName,
 }: Props) {
   const [activeTab, setActiveTab] = useState(0);
 
-  if (!isOpen) return null;
-
   const pickRandom = (arr: string[]): string => arr[Math.floor(Math.random() * arr.length)];
 
-  // 🎲 स्पिंटैक्स और ctaConfig से ग्रीटिंग/ओपनर/साइनऑफ लेकर प्रीव्यू जनरेट करना
-  const generateSamples = () => {
+  // 🎲 Spintax + Subject Rotation Preview Generator
+  const generateSamples = useCallback(() => {
     const cleanHeaderName = (senderName || "Team").trim();
     const finalSignoffName =
       customSignoffName && customSignoffName.trim().length > 0
         ? customSignoffName.trim()
         : cleanHeaderName;
 
+    // स्पिंटैक्स सॉल्वर
     const resolveSpintax = (text: string) => {
       let resolved = text || "";
       const regex = /\{([^{}]+)\}/g;
@@ -47,28 +48,74 @@ export default function SpintaxPreviewModal({
       return resolved;
     };
 
-    const samples = [];
+    // सभी एक्टिव और नॉन-एम्प्टी सब्जेक्ट्स इकट्ठा करें
+    let allSubjects: string[] = [];
+    if (subjects && Array.isArray(subjects)) {
+      allSubjects = subjects.map((s) => s.trim()).filter((s) => s.length > 0);
+    }
+    if (allSubjects.length === 0 && subject && subject.trim().length > 0) {
+      allSubjects = [subject.trim()];
+    }
+
+    const samplesList = [];
+    let previousSubjectIndex = -1;
+
     for (let i = 0; i < 4; i++) {
       const randomGreeting = pickRandom(GREETINGS);
       const randomOpener = pickRandom(OPENERS);
       const randomSignOff = pickRandom(SIGN_OFFS);
 
       const resolvedBody = resolveSpintax(template);
-      const resolvedSubject = resolveSpintax(subject) || "(No Subject)";
-      
-      // 📝 यह ठीक वही फॉर्मेट है जो बैकएंड में मेल के साथ जुड़कर जाता है
-      const sampleBody = `${randomGreeting}\n\n${randomOpener}\n\n${resolvedBody || "(Your message body will appear here)"}\n\n${randomSignOff}\n\n${finalSignoffName}`;
-      
-      samples.push({ subject: resolvedSubject, body: sampleBody });
-    }
-    return samples;
-  };
 
-  const [samples, setSamples] = useState(generateSamples());
+      // 🎯 नो-रिपीट सब्जेक्ट रोटेशन इंजन
+      let rawSelectedSubject = "(No Subject)";
+      if (allSubjects.length === 1) {
+        rawSelectedSubject = allSubjects[0];
+      } else if (allSubjects.length === 2) {
+        previousSubjectIndex = previousSubjectIndex === 0 ? 1 : 0;
+        rawSelectedSubject = allSubjects[previousSubjectIndex];
+      } else if (allSubjects.length > 2) {
+        let nextIdx: number;
+        do {
+          nextIdx = Math.floor(Math.random() * allSubjects.length);
+        } while (nextIdx === previousSubjectIndex);
+        previousSubjectIndex = nextIdx;
+        rawSelectedSubject = allSubjects[nextIdx];
+      }
+
+      const resolvedSubject = resolveSpintax(rawSelectedSubject);
+      const sampleBody = `${randomGreeting}\n\n${randomOpener}\n\n${resolvedBody || "(Your message body will appear here)"}\n\n${randomSignOff}\n\n${finalSignoffName}`;
+
+      samplesList.push({
+        subject: resolvedSubject,
+        body: sampleBody,
+        subjectIndex: previousSubjectIndex >= 0 ? previousSubjectIndex + 1 : 1,
+        totalSubjects: allSubjects.length,
+      });
+    }
+
+    return samplesList;
+  }, [template, subject, subjects, senderName, customSignoffName]);
+
+  // ⚡ सारे React Hooks हमेशा सबसे ऊपर रहेंगे
+  const [samples, setSamples] = useState(() => generateSamples());
+
+  useEffect(() => {
+    if (isOpen) {
+      setSamples(generateSamples());
+      setActiveTab(0);
+    }
+  }, [isOpen, generateSamples]);
 
   const handleReRoll = () => {
     setSamples(generateSamples());
   };
+
+  // ⚡ Hooks के बाद ही Early Return होगा
+  if (!isOpen) return null;
+
+  const currentSample = samples[activeTab];
+  const activeSubjectCount = (subjects && subjects.filter((s) => s.trim().length > 0).length) || (subject ? 1 : 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md transition-all animate-fadeIn">
@@ -81,11 +128,22 @@ export default function SpintaxPreviewModal({
               🎲
             </div>
             <div>
-              <h3 className="text-sm font-bold text-white tracking-wide">
-                Spintax & Template Preview Inspector
-              </h3>
-              <p className="text-[11px] text-slate-400">
-                Simulating exact layout with Greetings, Openers & Sign-offs from ctaConfig
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-white tracking-wide">
+                  Spintax & Rotation Inspector
+                </h3>
+                {activeSubjectCount > 1 ? (
+                  <span className="text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 px-2 py-0.5 rounded-md font-mono font-bold">
+                    🔄 {activeSubjectCount} Subjects Rotator Active
+                  </span>
+                ) : (
+                  <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-md font-mono">
+                    Single Subject Mode
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Simulating exact layout with Greetings, Openers, No-Repeat Subject Rotation & Sign-offs
               </p>
             </div>
           </div>
@@ -98,19 +156,24 @@ export default function SpintaxPreviewModal({
         </div>
 
         {/* Tab Selector & Re-Roll Button */}
-        <div className="px-5 py-3 bg-slate-950/30 border-b border-slate-800/60 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5">
-            {samples.map((_, idx) => (
+        <div className="px-5 py-3 bg-slate-950/30 border-b border-slate-800/60 flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {samples.map((s, idx) => (
               <button
                 key={idx}
                 onClick={() => setActiveTab(idx)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer ${
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${
                   activeTab === idx
                     ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
                     : "bg-slate-950/60 text-slate-400 hover:text-slate-200 border border-slate-900"
                 }`}
               >
-                Variation #{idx + 1}
+                <span>Variation #{idx + 1}</span>
+                {s.totalSubjects > 1 && (
+                  <span className="text-[9px] bg-indigo-900/60 text-indigo-300 px-1.5 py-0.2 rounded">
+                    S{s.subjectIndex}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -125,14 +188,21 @@ export default function SpintaxPreviewModal({
 
         {/* Dynamic Preview Container */}
         <div className="p-5 overflow-y-auto max-h-[55vh] space-y-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-slate-800 [&::-webkit-scrollbar-thumb]:rounded-full">
-          {samples[activeTab] ? (
+          {currentSample ? (
             <div className="space-y-3.5 animate-fadeIn">
               <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                  Resolved Subject Line
-                </label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    Resolved Subject Line
+                  </label>
+                  {currentSample.totalSubjects > 1 && (
+                    <span className="text-[10px] text-indigo-400 font-mono">
+                      (Picked Slot #{currentSample.subjectIndex} of {currentSample.totalSubjects})
+                    </span>
+                  )}
+                </div>
                 <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono font-medium shadow-inner flex items-center justify-between">
-                  <span className="truncate">{samples[activeTab].subject || "(No Subject)"}</span>
+                  <span className="truncate">{currentSample.subject || "(No Subject)"}</span>
                   <span className="text-[10px] text-slate-500 font-sans shrink-0 ml-2">Clean Text</span>
                 </div>
               </div>
@@ -142,7 +212,7 @@ export default function SpintaxPreviewModal({
                   Resolved Email Body (As Received by Lead with ctaConfig)
                 </label>
                 <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 whitespace-pre-wrap leading-relaxed shadow-inner min-h-[140px] font-sans">
-                  {samples[activeTab].body || "(No Body Content Provided)"}
+                  {currentSample.body || "(No Body Content Provided)"}
                 </div>
               </div>
             </div>
@@ -156,7 +226,7 @@ export default function SpintaxPreviewModal({
         {/* Footer */}
         <div className="px-5 py-3 border-t border-slate-800/80 bg-slate-950/40 flex items-center justify-between">
           <span className="text-[11px] text-emerald-400 font-sans flex items-center gap-1">
-            <span>✨</span> 100% Synced with Backend ctaConfig Layout
+            <span>✨</span> 100% Synced with Backend ctaConfig & Subject Rotation
           </span>
           <button
             onClick={onClose}

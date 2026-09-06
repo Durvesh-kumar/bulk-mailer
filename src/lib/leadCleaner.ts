@@ -1,6 +1,6 @@
 // src/lib/leadCleaner.ts
 
-// डिस्पोजेबल / टेम्परेरी इनबॉक्स
+// 1. केवल असली डिस्पोज़ेबल / 10-मिनट अस्थायी इनबॉक्स
 const DISPOSABLE_DOMAINS = new Set([
   "mailinator.com",
   "tempmail.com",
@@ -12,11 +12,11 @@ const DISPOSABLE_DOMAINS = new Set([
   "getairmail.com",
   "temp-mail.org",
   "dispostable.com",
+  "burnermail.io",
 ]);
 
-// डमी, सैंपल, प्लेसहोल्डर और बेकार डोमेन जो अक्सर वेब पेजों पर गलती से लिखे होते हैं
+// 2. डमी और प्लेसहोल्डर डोमेन (जहाँ कभी असली मेल नहीं होती)
 const DUMMY_PLACEHOLDER_DOMAINS = new Set([
-  "email.com",         // स्क्रीनशॉट वाला info@email.com
   "example.com",
   "example.org",
   "example.net",
@@ -31,7 +31,25 @@ const DUMMY_PLACEHOLDER_DOMAINS = new Set([
   "fake.com",
 ]);
 
-// सख्त Regex: शुरू में ^ और अंत में $ दोनों मौजूद हैं
+// 3. केवल सटीक टेम्पलेट प्लेसहोल्डर ईमेल्स (पूरा email.com डोमेन ब्लॉक नहीं होगा)
+const DUMMY_EXACT_EMAILS = new Set([
+  "info@email.com",
+  "user@email.com",
+  "test@email.com",
+  "sample@email.com",
+  "name@email.com",
+  "youremail@email.com",
+  "email@email.com",
+  "admin@email.com",
+  "contact@email.com",
+  "support@email.com",
+  "john.doe@example.com",
+]);
+
+// इमेज या वेब एसेट एक्सटेंशन जो गलती से स्क्रैप हो जाते हैं
+const JUNK_ASSET_EXTENSIONS = /\.(png|jpg|jpeg|gif|svg|webp|css|js|woff|ttf|ico|bmp)$/i;
+
+// सख्त Regex: सही ईमेल स्ट्रक्चर के लिए
 const EMAIL_STRICT_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
 export interface RejectedEmailItem {
@@ -54,11 +72,14 @@ export interface CleanLeadsResult {
   rejectedList: RejectedEmailItem[];
 }
 
-// ⚡ 1. रिपेयर और सैनिटाइज फंक्शन (कीमती डेटा को फेंकने के बजाय पहले ठीक करें)
+// ⚡ 1. रिपेयर और सैनिटाइज फंक्शन (कचरा हटाकर डेटा को रिकवर करना)
 export function sanitizeEmailString(rawInput: string): string | null {
   if (!rawInput) return null;
 
   let cleaned = rawInput.trim();
+
+  // mailto: प्रीफिक्स हटाएं
+  cleaned = cleaned.replace(/^mailto:/i, "");
 
   // एंगल ब्रैकेट्स हटाएं: "Name" <user@domain.com> -> user@domain.com
   const angleMatch = cleaned.match(/<([^>]+)>/);
@@ -66,25 +87,28 @@ export function sanitizeEmailString(rawInput: string): string | null {
     cleaned = angleMatch[1].trim();
   }
 
-  // पीछे चिपका हुआ .read या .comread हटाएं
+  // स्क्रैपिंग के दौरान चिपका हुआ .read, .comread, .netread आदि हटाएं
+  cleaned = cleaned.replace(/\.(com|net|org|io|co|biz|info)read$/i, ".$1");
   cleaned = cleaned.replace(/\.read$/i, "");
-  cleaned = cleaned.replace(/\.comread$/i, ".com");
+  cleaned = cleaned.replace(/[\/\\]+$/, ""); // आख़िरी स्लैश हटाएं
+  cleaned = cleaned.replace(/[.,;:]+$/, ""); // आख़िरी पंक्चुएशन हटाएं
 
-  // शुद्ध ईमेल मैच निकालें
+  // शुद्ध ईमेल पैटर्न निकालें
   const emailMatch = cleaned.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
   if (!emailMatch) return null;
 
   let finalEmail = emailMatch[0].toLowerCase().trim();
 
-  if (finalEmail.endsWith(".read")) {
-    finalEmail = finalEmail.replace(/\.read$/, "");
+  // इमेज या एसेट एक्सटेंशन बाहर करें
+  if (JUNK_ASSET_EXTENSIONS.test(finalEmail)) {
+    return null;
   }
 
   return EMAIL_STRICT_REGEX.test(finalEmail) ? finalEmail : null;
 }
 
 // =========================================================================
-// 2. आपका सिंक्रोनस मेथड (ब्राउज़र / क्लाइंट के लिए 100% सेफ - नो बंडल एरर)
+// 2. सिंक्रोनस मेथड (100% क्लाइंट-सेफ, सुपर फास्ट)
 // =========================================================================
 export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
   const lines = rawInput.split(/[\n,;\t]+/).map((l) => l.trim()).filter(Boolean);
@@ -98,7 +122,6 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
   let dummyCount = 0;
 
   for (const raw of lines) {
-    // ⚡ सीधे रिजेक्ट करने के बजाय पहले .read और कचरा साफ़ करें
     const email = sanitizeEmailString(raw);
 
     if (!email) {
@@ -106,7 +129,7 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       rejectedList.push({
         email: raw,
         reason: "INVALID_SYNTAX",
-        description: "Invalid email syntax or corrupt structure",
+        description: "Invalid email syntax, malformed structure or junk asset",
       });
       continue;
     }
@@ -124,12 +147,12 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
 
     const domain = domainParts[1];
 
-    if (domain.includes("..") || domain.startsWith("-") || domain.endsWith("-")) {
+    if (domain.includes("..") || domain.startsWith("-") || domain.endsWith("-") || !domain.includes(".")) {
       syntaxErrorsCount++;
       rejectedList.push({
         email: raw,
         reason: "INVALID_SYNTAX",
-        description: "Invalid characters in domain name",
+        description: "Invalid characters or format in domain name",
       });
       continue;
     }
@@ -145,13 +168,13 @@ export function cleanAndFilterLeads(rawInput: string): CleanLeadsResult {
       continue;
     }
 
-    // 2. डमी / प्लेसहोल्डर डोमेन चेक (जैसे info@email.com)
-    if (DUMMY_PLACEHOLDER_DOMAINS.has(domain)) {
+    // 2. डमी डोमेन या सटीक डमी टेम्पलेट ईमेल चेक
+    if (DUMMY_PLACEHOLDER_DOMAINS.has(domain) || DUMMY_EXACT_EMAILS.has(email)) {
       dummyCount++;
       rejectedList.push({
         email: raw,
         reason: "DUMMY_DOMAIN",
-        description: "Placeholder dummy domain rejected",
+        description: "Placeholder dummy domain or template rejected",
       });
       continue;
     }
