@@ -4,13 +4,9 @@ import { connectToCentralDB } from "./db/centralDb";
 import { getLicenseModel } from "@/lib/models/License";
 import { getLicenseWithCache, forcePurgeLicenseCache } from "./licenseCache";
 
-function getRequiredJwtSecret(): string {
-  const secret = process.env.JWT_SECRET_KEY;
-  if (!secret || secret.trim() === "") {
-    throw new Error("JWT_SECRET_KEY is missing in environment variables!");
-  }
-  return secret;
-}
+const JWT_SECRET: string = process.env.JWT_SECRET_KEY || (() => {
+  throw new Error("JWT_SECRET_KEY is missing in environment variables!");
+})();
 
 export function cleanAppDomain(input: string): string {
   if (!input) return "localhost";
@@ -107,7 +103,7 @@ export async function verifyLicenseAndDevice(
       };
     }
 
-    const jwtSecret = getRequiredJwtSecret();
+    const jwtSecret = JWT_SECRET;
     const currentVersion = license.tokenVersion || 1;
     const resolvedUserId = String(license._id);
 

@@ -7,10 +7,10 @@ if (!cached) {
 }
 
 export async function connectToCentralDB() {
-  const CENTRAL_DB_URI = process.env.CENTRAL_DB_URI;
+  const CENTRAL_DB_URI = process.env.MONGODB_URI;
 
   if (!CENTRAL_DB_URI) {
-    throw new Error("CENTRAL_DB_URI is missing in environment variables!");
+    throw new Error("MONGODB_URI is missing in environment variables!");
   }
 
   if (cached.conn && mongoose.connection.readyState === 1) {
