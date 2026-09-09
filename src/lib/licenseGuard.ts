@@ -4,9 +4,13 @@ import { connectToCentralDB } from "./db/centralDb";
 import { getLicenseModel } from "@/lib/models/License";
 import { getLicenseWithCache, forcePurgeLicenseCache } from "./licenseCache";
 
-const JWT_SECRET: string = process.env.JWT_SECRET_KEY || (() => {
-  throw new Error("JWT_SECRET_KEY is missing in environment variables!");
-})();
+function getRequiredJwtSecret(): string {
+  const secret = process.env.JWT_SECRET_KEY;
+  if (!secret || secret.trim() === "") {
+    throw new Error("JWT_SECRET_KEY is missing in environment variables!");
+  }
+  return secret;
+}
 
 export function cleanAppDomain(input: string): string {
   if (!input) return "localhost";
@@ -28,80 +32,82 @@ export async function verifyLicenseAndDevice(
   const currentMachine = machineId ? machineId.trim() : "";
 
   if (!currentMachine) {
-    return { 
-      ok: false, 
-      reason: "MISSING_HARDWARE_ID", 
-      error: "Hardware fingerprint missing.", 
+    return {
+      ok: false,
+      reason: "MISSING_HARDWARE_ID",
+      error: "Hardware fingerprint missing.",
       clearClientSession: true,
       expiryDate: null,
-      expiresAt: null
+      expiresAt: null,
     };
   }
 
   try {
-    // 1. लाइसेंस निकालो
     let license = await getLicenseWithCache(appDomain);
 
     if (!license) {
-      return { 
-        ok: false, 
-        reason: "NEW_USER", 
-        error: `Domain (${appDomain}) not registered.`, 
+      return {
+        ok: false,
+        reason: "NEW_USER",
+        error: `Domain (${appDomain}) not registered.`,
         clearClientSession: true,
         expiryDate: null,
-        expiresAt: null
+        expiresAt: null,
       };
     }
 
     const licenseExpiry = license.expiresAt ? new Date(license.expiresAt).toISOString() : null;
 
     if (license.status !== "ACTIVE") {
-      return { 
-        ok: false, 
-        reason: "SUSPENDED", 
-        error: "License Suspended. Contact Admin.", 
+      return {
+        ok: false,
+        reason: "SUSPENDED",
+        error: "License Suspended. Contact Admin.",
         clearClientSession: true,
         expiryDate: licenseExpiry,
-        expiresAt: licenseExpiry
+        expiresAt: licenseExpiry,
       };
     }
 
     if (license.expiresAt && new Date() > new Date(license.expiresAt)) {
-      return { 
-        ok: false, 
-        reason: "EXPIRED", 
-        error: "Subscription Expired.", 
+      return {
+        ok: false,
+        reason: "EXPIRED",
+        error: "Subscription Expired.",
         clearClientSession: true,
         expiryDate: licenseExpiry,
-        expiresAt: licenseExpiry
+        expiresAt: licenseExpiry,
       };
     }
 
-    // 2. डिवाइस बाइंडिंग चेक
-    if (!license.lockedDeviceId || license.lockedDeviceId.trim() === "") {
+    const isDeviceUnbound =
+      !license.lockedDeviceId ||
+      license.lockedDeviceId.trim() === "" ||
+      license.lockedDeviceId.toLowerCase() === "unbound";
+
+    if (isDeviceUnbound) {
       const centralConn = await connectToCentralDB();
       const License = getLicenseModel(centralConn);
-      
+
       await License.updateOne(
         { appDomain },
         { lockedDeviceId: currentMachine, lastBoundAt: new Date() }
       );
-      
+
       license.lockedDeviceId = currentMachine;
       forcePurgeLicenseCache(appDomain);
-    } 
-    else if (license.lockedDeviceId !== currentMachine) {
+    } else if (license.lockedDeviceId !== currentMachine) {
       return {
         ok: false,
         reason: "NEW_DEVICE",
         error: "Device mismatch! Please contact Admin to reset your hardware binding.",
         clearClientSession: true,
         expiryDate: licenseExpiry,
-        expiresAt: licenseExpiry
+        expiresAt: licenseExpiry,
       };
     }
 
-    // 3. टोकन जनरेट करो
+    const jwtSecret = getRequiredJwtSecret();
     const currentVersion = license.tokenVersion || 1;
     const resolvedUserId = String(license._id);
 
@@ -113,7 +119,7 @@ export async function verifyLicenseAndDevice(
         licenseId: resolvedUserId,
         tokenVersion: currentVersion,
       },
-      JWT_SECRET,
+      jwtSecret,
       { expiresIn: "24h" }
     );
 
@@ -125,15 +131,15 @@ export async function verifyLicenseAndDevice(
       userId: resolvedUserId,
       licenseId: resolvedUserId,
       expiryDate: licenseExpiry,
-      expiresAt: licenseExpiry
+      expiresAt: licenseExpiry,
     };
   } catch (err: any) {
-    return { 
-      ok: false, 
-      reason: "SERVER_ERROR", 
+    return {
+      ok: false,
+      reason: "SERVER_ERROR",
       error: "DB Error: " + err.message,
       expiryDate: null,
-      expiresAt: null
+      expiresAt: null,
     };
   }
 }

@@ -10,18 +10,13 @@ export type CachedLicense = {
   expiresAt?: Date;
 };
 
-// Node.js ग्लोबल इन-मेमोरी मैप
 const globalCache = global as unknown as { licenseMemoryMap?: Map<string, CachedLicense> };
 export const licenseMemoryMap = globalCache.licenseMemoryMap || new Map<string, CachedLicense>();
 if (process.env.NODE_ENV !== "production") globalCache.licenseMemoryMap = licenseMemoryMap;
 
-// ⚡ 1. कैशे से डेटा पढ़ें (Zero-DB Query जब तक कैशे में मौजूद है)
 export async function getLicenseWithCache(appDomain: string): Promise<CachedLicense | null> {
   const cached = licenseMemoryMap.get(appDomain);
-
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
   const centralConn = await connectToCentralDB();
   const License = getLicenseModel(centralConn);
@@ -44,7 +39,6 @@ export async function getLicenseWithCache(appDomain: string): Promise<CachedLice
   return dataToCache;
 }
 
-// ⚡ 2. जब एडमिन स्टेटस बदले, रीसेट करे या नई बाइंडिंग हो — तुरंत फ़ोर्सफुल पर्ज
 export function forcePurgeLicenseCache(appDomain: string) {
   licenseMemoryMap.delete(appDomain);
 }

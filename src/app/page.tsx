@@ -318,91 +318,148 @@ export default function Home() {
   };
 
   const handleQuickClean = () => {
-    if (!rawSheetData.trim()) {
-      alert("⚠️ Please paste your email leads list in the box first to clean!");
-      return;
-    }
-    const result = cleanAndFilterLeads(rawSheetData);
-    setRawSheetData(result.cleanedText);
-    setRejectedData(result.rejectedList);
-    setRejectedStats({
-      total: result.rejectedCount,
-      dups: result.duplicatesCount,
-      syntax: result.syntaxErrorsCount,
-      temp: result.disposableCount,
-    });
-    if (result.rejectedCount > 0) setShowRejectedModal(true);
-    else if (result.validEmails.length > 0) alert(`✨ Quick Clean Complete! ${result.validEmails.length} valid lead(s) found.`);
-    else alert("❌ No valid email addresses found.");
-  };
+  const input = (rawSheetData || "").trim();
+  if (!input) {
+    alert("⚠️ Please paste your email leads list in the box first to clean!");
+    return;
+  }
+
+  const result = cleanAndFilterLeads(input);
+
+  // Force new references so React re-renders
+  setRawSheetData(result.cleanedText || "");
+  setRejectedData([...result.rejectedList]);
+  setRejectedStats({
+    total: result.rejectedCount,
+    dups: result.duplicatesCount,
+    syntax: result.syntaxErrorsCount,
+    temp: result.disposableCount,
+  });
+
+  if (result.rejectedCount > 0) {
+    setShowRejectedModal(true);
+  } else if (result.validEmails.length > 0) {
+    alert(`✨ Quick Clean Complete! ${result.validEmails.length} valid lead(s) found.`);
+  } else {
+    alert("❌ No valid email addresses found.");
+  }
+};
+
+
 
   const handleDnsMxVerify = async () => {
     if (!rawSheetData.trim()) {
-      alert("⚠️ Please clean or paste your leads first before running DNS check!");
+      alert("⚠️ कृपया DNS व SMTP चेक चलाने से पहले अपनी लीड्स पेस्ट करें!");
       return;
     }
 
+    // 1. केवल बेसिक सिंटैक्स कचरा, गैर-ईमेल स्ट्रिंग्स और डुप्लीकेट्स साफ़ करें
     const preCleaned = cleanAndFilterLeads(rawSheetData);
     if (preCleaned.validEmails.length === 0) {
-      alert("❌ No valid syntax emails found to verify via DNS.");
+      alert("❌ कोई भी मान्य ईमेल प्रारूप नहीं मिला।");
       return;
     }
 
-    const allToVerify = preCleaned.validEmails;
-    const CHUNK_SIZE = 8;
-    const verifiedValidEmails: string[] = [];
+    // प्रारंभिक रिजेक्टेड लिस्ट (सिंटैक्स एरर, डुप्लीकेट आदि)
     const newlyRejectedList: RejectedEmailItem[] = [...preCleaned.rejectedList];
+    const verifiedValidEmails: string[] = [];
+
+    // 👉 ध्यान दें: अब कोई डोमेन स्किप नहीं होगा! 
+    // Gmail, Yahoo, Hotmail, Outlook, iCloud और बिज़नेस डोमेन सब SMTP हैंडशेक पर जाएँगे
+    const allEmailsToVerify: string[] = [...preCleaned.validEmails];
+
+    // 10 Tor प्रॉक्सी कंटेनर्स के लिए 5-5 का समानांतर बैच (Parallel Chunks)
+    const CHUNK_SIZE = 5;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
     setIsDnsChecking(true);
 
     try {
-      for (let i = 0; i < allToVerify.length; i += CHUNK_SIZE) {
-        const chunk = allToVerify.slice(i, i + CHUNK_SIZE);
-        const processedSoFar = Math.min(i + CHUNK_SIZE, allToVerify.length);
+      for (let i = 0; i < allEmailsToVerify.length; i += CHUNK_SIZE) {
+        const chunk = allEmailsToVerify.slice(i, i + CHUNK_SIZE);
+        const processedSoFar = Math.min(i + CHUNK_SIZE, allEmailsToVerify.length);
 
-        setDnsProgressText(`🌐 DNS MX Checking: ${processedSoFar} / ${allToVerify.length} leads...`);
+        setDnsProgressText(
+          `⚡ SMTP हैंडशेक चल रहा है: ${processedSoFar} / ${allEmailsToVerify.length}...`
+        );
 
-        const res = await fetch("/api/verify-dns", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ emails: chunk }),
+        // 🚀 एक साथ 5 ईमेल्स पर HELO / MAIL FROM / RCPT TO हैंडशेक
+        const batchPromises = chunk.map(async (email) => {
+          try {
+            const res = await fetch("/api/verify-dns", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ email }),
+            });
+
+            if (!res.ok) {
+              const errBody = await res.json().catch(() => ({}));
+              return {
+                email,
+                valid: false,
+                reason: errBody.reason || "SERVER_ERROR",
+                message: errBody.message || "सर्वर से वैध रिस्पॉन्स नहीं मिला",
+              };
+            }
+
+            return await res.json();
+          } catch (netErr: any) {
+            return {
+              email,
+              valid: false,
+              reason: "CONN_ERR",
+              message: netErr?.message || "प्रॉक्सी टनल या सॉकेट कनेक्शन टाइमआउट",
+            };
+          }
         });
 
-        if (!res.ok) {
-          throw new Error("DNS API request failed on batch");
+        // बैच का रिज़ल्ट प्राप्त करें
+        const batchResults = await Promise.all(batchPromises);
+
+        for (const result of batchResults) {
+          if (result.valid) {
+            // मेलबॉक्स असली और सक्रिय है (250 OK)
+            verifiedValidEmails.push(result.email);
+          } else {
+            // मेलबॉक्स मौजूद नहीं है (550) या ब्लॉक हुआ
+            newlyRejectedList.push({
+              email: result.email,
+              reason: result.reason || "DISPOSABLE_DOMAIN",
+              description: result.message || "मेलबॉक्स मौजूद नहीं है या रिजेक्ट हुआ",
+            });
+          }
         }
 
-        const data: {
-          valid: string[];
-          invalid: { email: string; reason: any; description: string }[];
-        } = await res.json();
-
-        verifiedValidEmails.push(...data.valid);
-
-        if (data.invalid && data.invalid.length > 0) {
-          newlyRejectedList.push(...data.invalid);
+        // रिमोट MX सर्वर्स पर अधिक लोड न पड़े इसलिए बैचों के बीच हल्का विराम (600ms)
+        if (i + CHUNK_SIZE < allEmailsToVerify.length) {
+          await sleep(600);
         }
       }
 
+      // 2. स्क्रीन पर केवल वही ईमेल रखें जो 100% डिलीवरेबल निकले
       setRawSheetData(verifiedValidEmails.join("\n"));
       setRejectedData(newlyRejectedList);
 
-      const noMxCount = newlyRejectedList.filter((r) => r.reason === "NO_MX_RECORD").length;
+      // स्टैट्स की सटीक गणना
+      const syntaxCount = newlyRejectedList.filter((r) => r.reason === "INVALID_SYNTAX").length;
+      const dupCount = newlyRejectedList.filter((r) => r.reason === "DUPLICATE").length;
+      const deadMailboxCount = newlyRejectedList.length - (syntaxCount + dupCount);
+
       setRejectedStats({
         total: newlyRejectedList.length,
-        dups: preCleaned.duplicatesCount,
-        syntax: preCleaned.syntaxErrorsCount,
-        temp: preCleaned.disposableCount + noMxCount,
+        dups: dupCount,
+        syntax: syntaxCount,
+        temp: deadMailboxCount,
       });
 
       if (newlyRejectedList.length > 0) {
         setShowRejectedModal(true);
       } else {
-        alert(`✨ All ${verifiedValidEmails.length} leads passed DNS MX verification!`);
+        alert(`✨ बधाई! सभी ${verifiedValidEmails.length} ईमेल्स का SMTP हैंडशेक 100% पास हो गया!`);
       }
     } catch (err) {
-      console.error("DNS Verify Loop Error:", err);
-      alert("An error occurred during DNS batch verification.");
+      console.error("हैंडशेक लूप में एरर:", err);
+      alert("सत्यापन प्रक्रिया में बाधा आई। कृपया बैकएंड व डॉकर स्थिति जांचें।");
     } finally {
       setIsDnsChecking(false);
       setDnsProgressText("");

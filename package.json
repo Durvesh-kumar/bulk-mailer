@@ -11,7 +11,6 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@types/node-imap": "^0.9.3",
-    "cheerio": "^1.2.0",
     "imap-simple": "^5.1.0",
     "imapflow": "^1.7.6",
     "jsonwebtoken": "^9.0.3",
@@ -21,7 +20,7 @@
     "next": "16.3.1",
     "node-imap": "^0.9.6",
     "nodemailer": "^9.1.0",
-    "openai": "^6.49.0",
+    "punycode": "^2.3.1",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

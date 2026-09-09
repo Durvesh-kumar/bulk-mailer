@@ -1,11 +1,4 @@
-// src/lib/db/centralDb.ts
 import mongoose from "mongoose";
-
-const MONGODB_URI = process.env.CENTRAL_DB_URI || process.env.MONGODB_URI;
-
-if (!MONGODB_URI) {
-  throw new Error("⚠️ Please define CENTRAL_DB_URI or MONGODB_URI in your .env.local file.");
-}
 
 let cached = (global as any).mongooseCentral;
 
@@ -14,6 +7,12 @@ if (!cached) {
 }
 
 export async function connectToCentralDB() {
+  const CENTRAL_DB_URI = process.env.CENTRAL_DB_URI;
+
+  if (!CENTRAL_DB_URI) {
+    throw new Error("CENTRAL_DB_URI is missing in environment variables!");
+  }
+
   if (cached.conn && mongoose.connection.readyState === 1) {
     return cached.conn;
   }
@@ -24,7 +23,7 @@ export async function connectToCentralDB() {
       maxPoolSize: 10,
     };
 
-    cached.promise = mongoose.connect(MONGODB_URI!, opts).then((instance) => instance);
+    cached.promise = mongoose.connect(CENTRAL_DB_URI, opts).then((instance) => instance);
   }
 
   try {
