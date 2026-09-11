@@ -1,20 +1,18 @@
 // src/hook/useWarmupQueue.ts
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { SESSION_TOKEN_KEY } from "@/types/vault";
-import {
-  isSenderInCooldown,
-  markSenderLotCompleted,
-  syncTimestampsToDatabase,
-} from "@/utils/cooldown";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { SESSION_TOKEN_KEY, ProfileTier, TIER_META } from "@/types/vault";
+import { markSenderLotCompleted, syncTimestampsToDatabase } from "@/utils/cooldown";
+import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 
 export interface AccountNode {
   _id?: string;
   senderName?: string;
   email: string;
   appPassword?: string;
-  profileTier?: string;
+  profileTier: ProfileTier;
+  accountAgeMode: AccountAgeMode;
   lastSentAt?: string | null;
   isExternalPeer?: boolean;
 }
@@ -26,6 +24,8 @@ export interface WarmupStats {
   currentSenderIndex: number;
 }
 
+const COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 घंटे का कूलडाउन
+
 function deduplicateAccounts(accounts: any[]): AccountNode[] {
   const seen = new Set<string>();
   const uniqueList: AccountNode[] = [];
@@ -35,13 +35,22 @@ function deduplicateAccounts(accounts: any[]): AccountNode[] {
     const cleanEmail = String(item.email).toLowerCase().trim();
     if (!seen.has(cleanEmail)) {
       seen.add(cleanEmail);
+
+      // 🎯 MongoDB के profileTier को TIER_META के ज़रिए सही मोड में मैप करें
+      const rawTier: ProfileTier = item.profileTier && TIER_META[item.profileTier as ProfileTier] 
+        ? (item.profileTier as ProfileTier) 
+        : "CURRENT";
+      
+      const meta = TIER_META[rawTier];
+
       uniqueList.push({
         _id: item._id,
         senderName: item.senderName ? String(item.senderName).trim() : "",
         email: cleanEmail,
         appPassword: item.appPassword || item.password || item.smtpPassword || item.encryptedPassword,
-        profileTier: item.profileTier,
-        lastSentAt: item.lastSentAt,
+        profileTier: rawTier,
+        accountAgeMode: meta ? meta.modeMap : "FRESH",
+        lastSentAt: item.lastSentAt || null,
         isExternalPeer: item.isExternalPeer,
       });
     }
@@ -50,14 +59,23 @@ function deduplicateAccounts(accounts: any[]): AccountNode[] {
 }
 
 export function useWarmupQueue(machineId: string, directSessionToken?: string) {
-  const [allVaultAccounts, setAllVaultAccounts] = useState<AccountNode[]>([]);
+  const [tierAccounts, setTierAccounts] = useState<AccountNode[]>([]);
   const [allReceivers, setAllReceivers] = useState<AccountNode[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [isRunning, setIsRunningState] = useState<boolean>(false);
   const [logs, setLogs] = useState<string[]>([]);
-  
+  const [activeSenderEmail, setActiveSenderEmail] = useState<string>("");
+
+  // 🎯 टियर सिलेक्शन (Default: "CURRENT" यानी Fresh)
+  const [selectedTier, setSelectedTier] = useState<ProfileTier>("CURRENT");
+  const currentMeta = TIER_META[selectedTier] || TIER_META.CURRENT;
+  const currentConfig = MODE_CONFIGS[currentMeta.modeMap] || MODE_CONFIGS.FRESH;
+
   const [intervalSeconds, setIntervalSeconds] = useState<number>(5);
-  const [lotSizePerAccount, setLotSizePerAccount] = useState<number>(5);
+  // 🎯 डिफ़ॉल्ट लॉट साइज़ अब 10 पर सेट है (लेकिन टियर की मैक्स लिमिट से ज़्यादा नहीं हो सकता)
+  const [lotSizePerAccount, setLotSizePerAccount] = useState<number>(
+    Math.min(10, currentConfig.maxLot)
+  );
 
   const [stats, setStats] = useState<WarmupStats>({
     totalProcessed: 0,
@@ -66,33 +84,97 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
     currentSenderIndex: 0,
   });
 
-  const isRunningRef = useRef(isRunning);
-  const activePoolRef = useRef<AccountNode[]>([]);
-  const receiversRef = useRef<AccountNode[]>([]);
-  const senderSentCountRef = useRef<Record<string, number>>({});
-  const senderProcessedTimesRef = useRef<Record<string, string>>({});
-  const intervalSecRef = useRef(intervalSeconds);
-  const lotSizeRef = useRef(lotSizePerAccount);
-  const currentSenderIdxRef = useRef<number>(0);
-  const currentReceiverIdxRef = useRef<number>(0);
+  const workerRef = useRef<Worker | null>(null);
+  const latestTimesRef = useRef<Record<string, string>>({});
 
-  useEffect(() => { isRunningRef.current = isRunning; }, [isRunning]);
-  useEffect(() => { receiversRef.current = allReceivers; }, [allReceivers]);
-  useEffect(() => { intervalSecRef.current = intervalSeconds; }, [intervalSeconds]);
-  useEffect(() => { lotSizeRef.current = lotSizePerAccount; }, [lotSizePerAccount]);
+  // टियर बदलते ही डिफ़ॉल्ट लॉट 10 या उस टियर की मैक्स लिमिट पर सेट करें
+  useEffect(() => {
+    const maxAllowed = currentConfig.maxLot;
+    const defaultVal = Math.min(10, maxAllowed);
+    setLotSizePerAccount(defaultVal);
+  }, [selectedTier]);
 
-  // 1. Initial Load (Single Call)
+  // 1. वेब वर्कर लाइफसाइकल
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const worker = new Worker("/workers/warmup.worker.js");
+    workerRef.current = worker;
+
+    worker.onmessage = (e: MessageEvent) => {
+      const { type, payload } = e.data;
+
+      if (type === "LOG" && payload.text) {
+        setLogs((prev) => [payload.text, ...prev.slice(0, 49)]);
+      }
+
+      if (type === "ACTIVE_SENDER_INDEX") {
+        setStats((prev) => ({ ...prev, currentSenderIndex: payload.currentSenderIndex }));
+        if (payload.activeEmail) setActiveSenderEmail(payload.activeEmail);
+      }
+
+      if (type === "EVICT_SENDER") {
+        setTierAccounts((prev) => prev.filter((a) => a.email.toLowerCase().trim() !== payload.email));
+        setLogs((prev) => [
+          `[${new Date().toLocaleTimeString()}] ⛔ Evicted [${payload.email}]: ${payload.reason}`,
+          ...prev.slice(0, 49),
+        ]);
+      }
+
+      if (type === "STATS_UPDATE") {
+        setStats((prev) => ({
+          ...prev,
+          totalProcessed: payload.totalProcessed,
+          totalFailed: payload.totalFailed,
+          rescuedCount: payload.rescuedCount,
+        }));
+        if (payload.senderProcessedTimes) {
+          latestTimesRef.current = payload.senderProcessedTimes;
+        }
+      }
+
+      if (type === "SENDER_LOT_FINISHED") {
+        markSenderLotCompleted(payload.email);
+        setTierAccounts((prev) =>
+          prev.map((acc) =>
+            acc.email.toLowerCase().trim() === payload.email
+              ? { ...acc, lastSentAt: payload.lastSentAt }
+              : acc
+          )
+        );
+        if (payload.text) {
+          setLogs((prev) => [payload.text, ...prev.slice(0, 49)]);
+        }
+      }
+
+      if (type === "TARGET_COMPLETED" || type === "PAUSED") {
+        setIsRunningState(false);
+        setActiveSenderEmail("");
+        if (payload?.message) {
+          setLogs((prev) => [payload.message, ...prev.slice(0, 49)]);
+        }
+        if (payload?.senderProcessedTimes && Object.keys(payload.senderProcessedTimes).length > 0) {
+          syncTimestampsToDatabase(machineId, payload.senderProcessedTimes);
+        }
+      }
+    };
+
+    return () => {
+      worker.terminate();
+    };
+  }, [machineId]);
+
+  // 2. डेटा लोड (सटीक ProfileTier फ़िल्टरिंग के साथ)
   useEffect(() => {
     if (!machineId) return;
 
-    const loadNetworkNodes = async () => {
+    let isMounted = true;
+    const loadTierData = async () => {
       try {
         setIsLoading(true);
         const storedToken =
           directSessionToken ||
-          (typeof window !== "undefined"
-            ? localStorage.getItem(SESSION_TOKEN_KEY) || ""
-            : "");
+          (typeof window !== "undefined" ? localStorage.getItem(SESSION_TOKEN_KEY) || "" : "");
 
         const [vaultRes, peerRes] = await Promise.all([
           fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}`, {
@@ -106,228 +188,126 @@ export function useWarmupQueue(machineId: string, directSessionToken?: string) {
         const vaultData = await vaultRes.json();
         const peerData = await peerRes.json();
 
+        if (!isMounted) return;
+
         const cleanSenders = deduplicateAccounts(vaultData.accounts || []);
         const cleanReceivers = deduplicateAccounts(peerData.receivers || cleanSenders);
+        
+        // 🎯 केवल चुने हुए ProfileTier का डेटा फ़िल्टर करें
+        const filteredByTier = cleanSenders.filter((acc) => acc.profileTier === selectedTier);
 
-        setAllVaultAccounts(cleanSenders);
+        setTierAccounts(filteredByTier);
         setAllReceivers(cleanReceivers);
 
-        const readySenders = cleanSenders.filter((s) => !isSenderInCooldown(s.email, s.lastSentAt));
-        activePoolRef.current = readySenders;
-
-        senderSentCountRef.current = {};
-        readySenders.forEach((s) => {
-          senderSentCountRef.current[s.email] = 0;
-        });
-
         setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] 🌐 Connected: ${cleanSenders.length} Senders (${readySenders.length} Ready in Queue) | ${cleanReceivers.length} Peer Inboxes.`,
+          `[${new Date().toLocaleTimeString()}] 📦 Loaded [Tier: ${currentMeta.label}]: ${filteredByTier.length} Senders.`,
           ...prev,
         ]);
       } catch (err: any) {
-        console.error("Network fetch error:", err);
+        console.error("Tier fetch error:", err);
       } finally {
-        setIsLoading(false);
+        if (isMounted) setIsLoading(false);
       }
     };
 
-    loadNetworkNodes();
-  }, [machineId, directSessionToken]);
+    loadTierData();
+    return () => { isMounted = false; };
+  }, [machineId, directSessionToken, selectedTier]);
 
-  // 2. Round-Robin Execution Loop
+  // 3. कूलडाउन वर्गीकरण
+  const { readySenders, coolingSenders, nearestCooldownMs } = useMemo(() => {
+    const ready: AccountNode[] = [];
+    const cooling: { account: AccountNode; remainingMs: number }[] = [];
+    const now = Date.now();
+
+    tierAccounts.forEach((acc) => {
+      if (acc.lastSentAt) {
+        const sentTime = new Date(acc.lastSentAt).getTime();
+        const remaining = sentTime + COOLDOWN_MS - now;
+        if (remaining > 0) {
+          cooling.push({ account: acc, remainingMs: remaining });
+        } else {
+          ready.push(acc);
+        }
+      } else {
+        ready.push(acc);
+      }
+    });
+
+    cooling.sort((a, b) => a.remainingMs - b.remainingMs);
+    return {
+      readySenders: ready,
+      coolingSenders: cooling,
+      nearestCooldownMs: cooling.length > 0 ? cooling[0].remainingMs : 0,
+    };
+  }, [tierAccounts]);
+
   useEffect(() => {
-    if (!isRunning) return;
-
-    let timeoutId: NodeJS.Timeout | null = null;
-
-    if (activePoolRef.current.length === 0) {
-      const ready = allVaultAccounts.filter((s) => !isSenderInCooldown(s.email, s.lastSentAt));
-      activePoolRef.current = ready;
-      senderSentCountRef.current = {};
-      ready.forEach((s) => {
-        senderSentCountRef.current[s.email] = 0;
+    if (workerRef.current) {
+      workerRef.current.postMessage({
+        action: "UPDATE_CONFIG",
+        payload: { intervalSeconds, lotSize: lotSizePerAccount },
       });
     }
+  }, [intervalSeconds, lotSizePerAccount]);
 
-    const processNextRobinStep = async () => {
-      if (!isRunningRef.current) return;
+  const setIsRunning = useCallback(
+    (start: boolean) => {
+      if (!workerRef.current) return;
 
-      const currentPool = activePoolRef.current;
-      const currentReceivers = receiversRef.current;
-      const targetLot = lotSizeRef.current;
+      if (start) {
+        const storedToken =
+          directSessionToken ||
+          (typeof window !== "undefined" ? localStorage.getItem(SESSION_TOKEN_KEY) || "" : "");
 
-      // 🛑 कतार खत्म
-      if (currentPool.length === 0 || currentReceivers.length === 0) {
-        setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] 🎉 Target Completed! All accounts finished their quota (${targetLot} each). Warm-up Stopped.`,
-          ...prev,
-        ]);
-        setIsRunning(false);
-        if (Object.keys(senderProcessedTimesRef.current).length > 0) {
-          syncTimestampsToDatabase(machineId, senderProcessedTimesRef.current);
+        if (readySenders.length === 0) {
+          setLogs((prev) => [
+            `[${new Date().toLocaleTimeString()}] ⏳ Cannot start: All senders in [${currentMeta.label}] are under 24h cooldown.`,
+            ...prev,
+          ]);
+          return;
         }
-        return;
-      }
 
-      // सेफ़ राउंड-रॉबिन इंडेक्स
-      if (currentSenderIdxRef.current >= currentPool.length) {
-        currentSenderIdxRef.current = 0;
-      }
+        if (allReceivers.length === 0) return;
 
-      const activeSender = currentPool[currentSenderIdxRef.current];
-      const activeEmail = activeSender.email.toLowerCase().trim();
-
-      setStats((prev) => ({
-        ...prev,
-        currentSenderIndex: currentSenderIdxRef.current,
-      }));
-
-      // पासवर्ड मिसिंग चेक
-      if (!activeSender.appPassword) {
-        activePoolRef.current = currentPool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
-        setAllVaultAccounts((prev) => prev.filter((a) => a.email.toLowerCase().trim() !== activeEmail));
-        setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] ⚠️ Password missing for ${activeSender.email}. Removed.`,
-          ...prev.slice(0, 49),
-        ]);
-        timeoutId = setTimeout(processNextRobinStep, 1000);
-        return;
-      }
-
-      // सेल्फ़-मेलिंग प्रिवेंशन
-      const validReceivers = currentReceivers.filter(
-        (r) => r.email.toLowerCase().trim() !== activeEmail
-      );
-
-      if (validReceivers.length === 0) {
-        setLogs((prev) => [`[${new Date().toLocaleTimeString()}] ⚠️ No peer receiver for ${activeSender.email}`, ...prev]);
-        currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % currentPool.length;
-        timeoutId = setTimeout(processNextRobinStep, 2000);
-        return;
-      }
-
-      const receiverIdx = currentReceiverIdxRef.current % validReceivers.length;
-      const activeReceiver = validReceivers[receiverIdx];
-
-      const effectiveToken =
-        directSessionToken ||
-        (typeof window !== "undefined"
-          ? localStorage.getItem(SESSION_TOKEN_KEY) || ""
-          : "");
-
-      try {
-        const res = await fetch("/api/silent-warmup", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-session-token": effectiveToken,
-          },
-          body: JSON.stringify({
+        setIsRunningState(true);
+        workerRef.current.postMessage({
+          action: "START",
+          payload: {
+            readySenders,
+            receivers: allReceivers,
+            lotSize: lotSizePerAccount,
+            intervalSeconds,
             machineId,
-            sessionToken: effectiveToken,
-            senderEmail: activeSender.email,
-            senderName: activeSender.senderName || "",
-            appPassword: activeSender.appPassword,
-            encryptedPassword: activeSender.appPassword,
-            receiverEmail: activeReceiver.email,
-          }),
+            sessionToken: storedToken,
+          },
         });
-
-        const data = await res.json();
-        const nowIso = new Date().toISOString();
-        const currentSent = (senderSentCountRef.current[activeEmail] || 0) + 1;
-        senderSentCountRef.current[activeEmail] = currentSent;
-        senderProcessedTimesRef.current[activeEmail] = nowIso;
-
-        if (res.ok && (data.success || data.status === "SUCCESS")) {
-          setStats((prev) => ({
-            ...prev,
-            totalProcessed: prev.totalProcessed + 1,
-            rescuedCount: prev.rescuedCount + (data.rescued ? 1 : 0),
-          }));
-
-          const displayName = activeSender.senderName ? `"${activeSender.senderName}" ` : "";
-          setLogs((prev) => [
-            `[${new Date().toLocaleTimeString()}] 🚀 [${currentSent}/${targetLot}] ${displayName}<${activeSender.email}> ➔ ${activeReceiver.email}`,
-            ...prev.slice(0, 49),
-          ]);
-
-          // कोटा पूरा होने पर एविक्शन
-          if (currentSent >= targetLot) {
-            markSenderLotCompleted(activeEmail);
-            activePoolRef.current = activePoolRef.current.filter(
-              (s) => s.email.toLowerCase().trim() !== activeEmail
-            );
-
-            setAllVaultAccounts((prev) =>
-              prev.map((acc) =>
-                acc.email.toLowerCase().trim() === activeEmail
-                  ? { ...acc, lastSentAt: nowIso }
-                  : acc
-              )
-            );
-
-            setLogs((prev) => [
-              `[${new Date().toLocaleTimeString()}] 🏁 [Done ${currentSent}/${targetLot}] ${activeSender.email} completed quota.`,
-              ...prev.slice(0, 49),
-            ]);
-            // इंडेक्स को वहीं रहने दें ताकि अगला आइटम प्रोसेस हो
-          } else {
-            currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % activePoolRef.current.length;
-          }
-        } else {
-          setStats((prev) => ({
-            ...prev,
-            totalFailed: prev.totalFailed + 1,
-          }));
-          currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % currentPool.length;
-
-          setLogs((prev) => [
-            `[${new Date().toLocaleTimeString()}] ❌ Delivery Error [${activeSender.email}]: ${data.error || "Failed"}`,
-            ...prev.slice(0, 49),
-          ]);
+      } else {
+        setIsRunningState(false);
+        setActiveSenderEmail("");
+        workerRef.current.postMessage({ action: "STOP" });
+        if (Object.keys(latestTimesRef.current).length > 0) {
+          syncTimestampsToDatabase(machineId, latestTimesRef.current);
         }
-
-        currentReceiverIdxRef.current = (currentReceiverIdxRef.current + 1) % validReceivers.length;
-      } catch (err: any) {
-        setStats((prev) => ({
-          ...prev,
-          totalFailed: prev.totalFailed + 1,
-        }));
-        currentSenderIdxRef.current = (currentSenderIdxRef.current + 1) % currentPool.length;
-
-        setLogs((prev) => [
-          `[${new Date().toLocaleTimeString()}] ❌ Network Error for ${activeSender.email}`,
-          ...prev.slice(0, 49),
-        ]);
       }
-
-      // रैंडम जिटर डिले (User Configured + 1-2s jitter)
-      const baseMs = Math.max(5, intervalSecRef.current || 5) * 1000;
-      const jitterMs = Math.floor(Math.random() * 2000) + 500;
-      const totalWaitMs = baseMs + jitterMs;
-
-      if (isRunningRef.current) {
-        timeoutId = setTimeout(processNextRobinStep, totalWaitMs);
-      }
-    };
-
-    processNextRobinStep();
-
-    return () => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (Object.keys(senderProcessedTimesRef.current).length > 0) {
-        syncTimestampsToDatabase(machineId, senderProcessedTimesRef.current);
-      }
-    };
-  }, [isRunning, machineId, directSessionToken]);
+    },
+    [readySenders, allReceivers, lotSizePerAccount, intervalSeconds, machineId, directSessionToken, selectedTier]
+  );
 
   return {
-    allVaultAccounts,
+    tierAccounts,
+    readySenders,
+    coolingSenders,
+    nearestCooldownMs,
     allReceivers,
+    selectedTier,
+    setSelectedTier,
+    currentMeta,
+    currentConfig,
     isLoading,
     isRunning,
     setIsRunning,
+    activeSenderEmail,
     logs,
     stats,
     intervalSeconds,

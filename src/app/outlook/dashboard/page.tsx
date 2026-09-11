@@ -4,7 +4,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useLicenseGuard } from "@/hook/useLicenseGuard";
-import { useWarmupQueue } from "@/hook/useWarmupQueue";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import FollowUpModal from "../components/FollowUpModal";
 import SmartReplyActions from "../components/SmartReplyActions";
@@ -25,21 +24,27 @@ interface MailNode {
   categoryTag?: "HOT" | "BUDGET" | "COLD" | "NIL";
 }
 
+interface SmtpAccountNode {
+  _id: string;
+  email: string;
+  appPassword: string;
+  senderName?: string;
+  profileTier?: string;
+}
+
 const CHUNK_SIZE = 5; // 🎯 एक बार में 5 अकाउंट्स का चंक स्कैन होगा
 
 export default function OutlookDashboardPage() {
   const { loadingLicense, isSuspended, userType, expiryDate, machineId, appDomain } = useLicenseGuard();
-  const { allVaultAccounts } = useWarmupQueue(machineId);
 
+  const [vaultAccounts, setVaultAccounts] = useState<SmtpAccountNode[]>([]);
   const [hotList, setHotList] = useState<MailNode[]>([]);
   const [budgetList, setBudgetList] = useState<MailNode[]>([]);
   const [coldList, setColdList] = useState<MailNode[]>([]);
   const [nilList, setNilList] = useState<MailNode[]>([]);
   const [totalScanned, setTotalScanned] = useState<number>(0);
 
-  // ⚠️ फ़ेल हुए अकाउंट्स का स्टेटस ट्रैक करने के लिए स्टेट
   const [failedCount, setFailedCount] = useState<number>(0);
-
   const [activeFilter, setActiveFilter] = useState<"HOT" | "BUDGET" | "COLD" | "NIL" | "ALL">("HOT");
   const [selectedMail, setSelectedMail] = useState<MailNode | null>(null);
 
@@ -47,8 +52,40 @@ export default function OutlookDashboardPage() {
   const [replyText, setReplyText] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [sending, setSending] = useState<boolean>(false);
-  const [statusMsg, setStatusMsg] = useState<string>("Ready");
+  const [statusMsg, setStatusMsg] = useState<string>("Initializing Vault Accounts...");
   const [showReminderInput, setShowReminderInput] = useState<boolean>(false);
+
+  // 🚀 1. सीधे API /api/smtp-vault से मशीन आईडी के सारे अकाउंट्स गेट (GET) मेथड से लोड करना
+  const fetchVaultAccounts = useCallback(async () => {
+    if (!machineId) return;
+    try {
+      const savedSession = typeof window !== "undefined" ? localStorage.getItem(SESSION_TOKEN_KEY) || "" : "";
+      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "x-session-token": savedSession,
+        },
+      });
+
+      const data = await res.json();
+      if (data.success && Array.isArray(data.accounts)) {
+        setVaultAccounts(data.accounts);
+        setStatusMsg(`Loaded ${data.accounts.length} account(s) from Vault. Ready to scan.`);
+      } else {
+        setStatusMsg("No accounts found in Vault.");
+      }
+    } catch (err) {
+      console.error("Error fetching vault accounts:", err);
+      setStatusMsg("Failed to load accounts from Vault.");
+    }
+  }, [machineId]);
+
+  useEffect(() => {
+    if (machineId) {
+      fetchVaultAccounts();
+    }
+  }, [machineId, fetchVaultAccounts]);
 
   // ⏰ फॉलो-अप रिमाइंडर शेड्यूलर
   const handleQuickSchedule = (days: number) => {
@@ -69,12 +106,12 @@ export default function OutlookDashboardPage() {
     setNilList(updateList(nilList));
   };
 
-  // 🚀 चंक-बेस्ड स्कैनर (फ़ॉल्ट-टॉलरेंट)
+  // 🚀 2. चंक-बेस्ड स्कैनर (फ़ॉल्ट-टॉलरेंट)
   const fetchAnalytics = useCallback(async () => {
-    if (allVaultAccounts.length === 0) return;
+    if (!vaultAccounts || vaultAccounts.length === 0) return;
 
     setLoading(true);
-    setStatusMsg(`Scanning ${allVaultAccounts.length} accounts in chunks of ${CHUNK_SIZE}...`);
+    setStatusMsg(`Scanning ${vaultAccounts.length} accounts in chunks of ${CHUNK_SIZE}...`);
 
     let accHot: MailNode[] = [];
     let accBudget: MailNode[] = [];
@@ -82,7 +119,6 @@ export default function OutlookDashboardPage() {
     let accNil: MailNode[] = [];
     let totalAuthFailed = 0;
 
-    // फ्रेश स्कैन के लिए स्टेट्स रीसेट
     setHotList([]);
     setBudgetList([]);
     setColdList([]);
@@ -93,10 +129,9 @@ export default function OutlookDashboardPage() {
 
     const storedToken = typeof window !== "undefined" ? localStorage.getItem(SESSION_TOKEN_KEY) || "" : "";
 
-    // 5-5 अकाउंट्स के चंक में बाँटना
-    const chunks: (typeof allVaultAccounts)[] = [];
-    for (let i = 0; i < allVaultAccounts.length; i += CHUNK_SIZE) {
-      chunks.push(allVaultAccounts.slice(i, i + CHUNK_SIZE));
+    const chunks: (typeof vaultAccounts)[] = [];
+    for (let i = 0; i < vaultAccounts.length; i += CHUNK_SIZE) {
+      chunks.push(vaultAccounts.slice(i, i + CHUNK_SIZE));
     }
 
     let processedCount = 0;
@@ -109,7 +144,7 @@ export default function OutlookDashboardPage() {
           body: JSON.stringify({
             machineId,
             sessionToken: storedToken,
-            accounts: chunk.map((a) => ({ email: a.email, appPassword: a.appPassword })),
+            accounts: chunk.map((a: any) => ({ email: a.email, appPassword: a.appPassword })),
             scanHours,
           }),
         });
@@ -126,7 +161,6 @@ export default function OutlookDashboardPage() {
             setFailedCount(totalAuthFailed);
           }
 
-          // 🎯 हर चंक के बाद UI में तुरंत नया डेटा जुड़ता जाएगा
           setHotList([...accHot]);
           setBudgetList([...accBudget]);
           setColdList([...accCold]);
@@ -146,19 +180,18 @@ export default function OutlookDashboardPage() {
       }
 
       processedCount += chunk.length;
-      setStatusMsg(`Scanned: ${Math.min(processedCount, allVaultAccounts.length)}/${allVaultAccounts.length} accounts...`);
+      setStatusMsg(`Scanned: ${Math.min(processedCount, vaultAccounts.length)}/${vaultAccounts.length} accounts...`);
     }
 
-    setStatusMsg(`✅ Completed scan for all ${allVaultAccounts.length} accounts.`);
+    setStatusMsg(`✅ Completed scan for all ${vaultAccounts.length} accounts.`);
     setLoading(false);
-  }, [allVaultAccounts, machineId, scanHours]);
+  }, [vaultAccounts, machineId, scanHours]);
 
   useEffect(() => {
-    if (allVaultAccounts.length > 0) {
+    if (vaultAccounts && vaultAccounts.length > 0) {
       fetchAnalytics();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allVaultAccounts.length, scanHours]);
+  }, [vaultAccounts.length, scanHours, fetchAnalytics]);
 
   const allLeadsCombined = [...hotList, ...budgetList, ...coldList, ...nilList];
   const displayedList =
@@ -173,8 +206,8 @@ export default function OutlookDashboardPage() {
       : allLeadsCombined;
 
   const activeVaultAccount =
-    allVaultAccounts.find((acc) => acc.email === selectedMail?.accountEmail) ||
-    allVaultAccounts[0];
+    vaultAccounts.find((acc: any) => acc.email === selectedMail?.accountEmail) ||
+    vaultAccounts[0];
 
   if (loadingLicense) {
     return (

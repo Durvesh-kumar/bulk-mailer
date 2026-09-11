@@ -4,7 +4,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useLicenseGuard } from "@/hook/useLicenseGuard";
-import { useWarmupQueue, AccountNode } from "@/hook/useWarmupQueue";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import { SESSION_TOKEN_KEY } from "@/types/vault";
 import FollowUpModal from "./components/FollowUpModal";
@@ -28,6 +27,14 @@ interface EmailItem {
   reminderDate?: string;
   accountEmail?: string;
   previousOutreach?: string;
+}
+
+interface SmtpVaultAccount {
+  _id: string;
+  email: string;
+  appPassword: string;
+  senderName?: string;
+  profileTier?: string;
 }
 
 type FilterTab = "ALL" | "REPLIES" | "IMPORTANT" | "RESCUED" | "UNREAD";
@@ -78,9 +85,12 @@ const createWorkerInterval = (callback: () => void, intervalMs: number) => {
 
 export default function OutlookPage() {
   const { loadingLicense, isSuspended, userType, expiryDate, machineId, appDomain } = useLicenseGuard();
-  const { allVaultAccounts, isLoading: loadingAccounts } = useWarmupQueue(machineId);
 
-  const [selectedAcc, setSelectedAcc] = useState<AccountNode | null>(null);
+  // ⚡ सीधे API /api/smtp-vault से डेटा लाने के लिए स्टेट
+  const [vaultAccounts, setVaultAccounts] = useState<SmtpVaultAccount[]>([]);
+  const [loadingAccounts, setLoadingAccounts] = useState<boolean>(true);
+
+  const [selectedAcc, setSelectedAcc] = useState<SmtpVaultAccount | null>(null);
   const [emails, setEmails] = useState<EmailItem[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<EmailItem | null>(null);
 
@@ -102,7 +112,6 @@ export default function OutlookPage() {
   const [radarAlert, setRadarAlert] = useState<string | null>(null);
   const [pendingHotEmails, setPendingHotEmails] = useState<EmailItem[]>([]);
 
-  // ⚠️ फ़ेल या मिसमैच पासवर्ड वाले अकाउंट्स को ट्रैक करने के लिए स्टेट
   const [failedAccounts, setFailedAccounts] = useState<Record<string, string>>({});
 
   const [replyText, setReplyText] = useState<string>("");
@@ -117,6 +126,43 @@ export default function OutlookPage() {
   useEffect(() => { isScanningRef.current = isAutoScanning; }, [isAutoScanning]);
   useEffect(() => { chunkIdxRef.current = currentScanningChunkIndex; }, [currentScanningChunkIndex]);
   useEffect(() => { pendingHotRef.current = pendingHotEmails; }, [pendingHotEmails]);
+
+  // 🚀 1. सीधे API /api/smtp-vault से GET मेथड के ज़रिए सारे अकाउंट्स फेच करना
+  const fetchVaultAccounts = useCallback(async () => {
+    if (!machineId) return;
+    setLoadingAccounts(true);
+    setStatusMessage("Fetching accounts from SMTP Vault...");
+
+    try {
+      const storedToken = typeof window !== "undefined" ? localStorage.getItem(SESSION_TOKEN_KEY) || "" : "";
+      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}`, {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          "x-session-token": storedToken,
+        },
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success && Array.isArray(data.accounts)) {
+        setVaultAccounts(data.accounts);
+        setStatusMessage(`Loaded ${data.accounts.length} account(s) from Vault.`);
+      } else {
+        setStatusMessage(`Vault Error: ${data.error || "No accounts found"}`);
+      }
+    } catch (err: any) {
+      console.error("Vault fetch error:", err);
+      setStatusMessage(`Network Error fetching vault: ${err.message}`);
+    } finally {
+      setLoadingAccounts(false);
+    }
+  }, [machineId]);
+
+  useEffect(() => {
+    if (machineId) {
+      fetchVaultAccounts();
+    }
+  }, [machineId, fetchVaultAccounts]);
 
   const handleQuickSchedule = (days: number) => {
     if (!selectedEmail) return;
@@ -133,14 +179,14 @@ export default function OutlookPage() {
   };
 
   const filteredAccounts = useMemo(() => {
-    if (!accountSearch.trim()) return allVaultAccounts;
+    if (!accountSearch.trim()) return vaultAccounts;
     const query = accountSearch.toLowerCase().trim();
-    return allVaultAccounts.filter((acc) => {
+    return vaultAccounts.filter((acc) => {
       const emailMatch = acc.email.toLowerCase().includes(query);
       const nameMatch = acc.senderName ? acc.senderName.toLowerCase().includes(query) : false;
       return emailMatch || nameMatch;
     });
-  }, [allVaultAccounts, accountSearch]);
+  }, [vaultAccounts, accountSearch]);
 
   const filteredEmails = useMemo(() => {
     let result = emails;
@@ -167,9 +213,8 @@ export default function OutlookPage() {
     return result;
   }, [emails, activeTab, emailSearch]);
 
-  // 📥 सिंगल अकाउंट लोड करना (हाथ से क्लिक करने पर)
   const loadInbox = useCallback(
-    async (acc: AccountNode): Promise<EmailItem[]> => {
+    async (acc: SmtpVaultAccount): Promise<EmailItem[]> => {
       if (!acc?.email || !machineId) return [];
 
       setSelectedAcc(acc);
@@ -203,7 +248,6 @@ export default function OutlookPage() {
 
         const data = await res.json();
         if (res.ok && data.success) {
-          // अगर पहले एरर था तो उसे क्लियर करें
           setFailedAccounts((prev) => {
             const next = { ...prev };
             delete next[acc.email.toLowerCase()];
@@ -235,9 +279,8 @@ export default function OutlookPage() {
     [machineId, scanHours]
   );
 
-  // 🚀 5-5 अकाउंट्स के चंक्स वाला ऑटो-राडार स्कैनर
   useEffect(() => {
-    if (!isAutoScanning || allVaultAccounts.length === 0) {
+    if (!isAutoScanning || vaultAccounts.length === 0) {
       if (workerRef.current) {
         workerRef.current.postMessage("STOP");
         workerRef.current.terminate();
@@ -246,9 +289,9 @@ export default function OutlookPage() {
       return;
     }
 
-    const chunks: AccountNode[][] = [];
-    for (let i = 0; i < allVaultAccounts.length; i += RADAR_CHUNK_SIZE) {
-      chunks.push(allVaultAccounts.slice(i, i + RADAR_CHUNK_SIZE));
+    const chunks: SmtpVaultAccount[][] = [];
+    for (let i = 0; i < vaultAccounts.length; i += RADAR_CHUNK_SIZE) {
+      chunks.push(vaultAccounts.slice(i, i + RADAR_CHUNK_SIZE));
     }
 
     workerRef.current = createWorkerInterval(async () => {
@@ -287,7 +330,6 @@ export default function OutlookPage() {
           let targetAccountEmail = "";
 
           for (const item of data.chunkResults) {
-            // 🎯 अगर किसी अकाउंट का पासवर्ड गलत है तो उसे ट्रैक करें, बाकी प्रोसेस न रुके
             if (item.authFailed) {
               setFailedAccounts((prev) => ({
                 ...prev,
@@ -302,7 +344,6 @@ export default function OutlookPage() {
               });
             }
 
-            // बाकी सही अकाउंट्स के मेल्स फ़िल्टर करें
             const hots = (item.emails || []).filter(
               (m: EmailItem) => (m.category === "REPLY" || m.category === "IMPORTANT" || m.isSpamRescued) && !m.isAnswered
             );
@@ -317,7 +358,7 @@ export default function OutlookPage() {
             playBeepSound();
             setIsAutoScanning(false);
 
-            const matchedAcc = allVaultAccounts.find((a) => a.email.toLowerCase() === targetAccountEmail.toLowerCase()) || currentChunk[0];
+            const matchedAcc = vaultAccounts.find((a) => a.email.toLowerCase() === targetAccountEmail.toLowerCase()) || currentChunk[0];
             setSelectedAcc(matchedAcc);
 
             const firstHot = foundHotEmails[0];
@@ -355,7 +396,7 @@ export default function OutlookPage() {
         workerRef.current = null;
       }
     };
-  }, [isAutoScanning, allVaultAccounts, machineId, scanHours]);
+  }, [isAutoScanning, vaultAccounts, machineId, scanHours]);
 
   const handleProceedNext = useCallback(() => {
     setReplyText("");
@@ -376,19 +417,19 @@ export default function OutlookPage() {
       setRadarAlert(null);
       setSelectedEmail(null);
       setPendingHotEmails([]);
-      const totalChunks = Math.ceil(allVaultAccounts.length / RADAR_CHUNK_SIZE) || 1;
+      const totalChunks = Math.ceil(vaultAccounts.length / RADAR_CHUNK_SIZE) || 1;
       setCurrentScanningChunkIndex((prev) => (prev + 1) % totalChunks);
       setIsAutoScanning(true);
     }
-  }, [allVaultAccounts.length, selectedAcc?.email]);
+  }, [vaultAccounts.length, selectedAcc?.email]);
 
   useEffect(() => {
-    if (allVaultAccounts && allVaultAccounts.length > 0 && !selectedAcc && !isAutoScanning) {
-      const first = allVaultAccounts[0];
+    if (vaultAccounts && vaultAccounts.length > 0 && !selectedAcc && !isAutoScanning) {
+      const first = vaultAccounts[0];
       setSelectedAcc(first);
       loadInbox(first);
     }
-  }, [allVaultAccounts, selectedAcc, loadInbox, isAutoScanning]);
+  }, [vaultAccounts, selectedAcc, loadInbox, isAutoScanning]);
 
   const handleTranslateToHindi = async () => {
     if (!selectedEmail) return;
@@ -487,8 +528,8 @@ export default function OutlookPage() {
     <div className="flex flex-col h-screen bg-slate-950 text-slate-100 font-sans">
       <div className="bg-slate-900 border-b border-slate-800 px-4 py-2 text-xs flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
-          <Link href="/warmup" className="text-indigo-400 hover:underline">
-            ← Warmup Dashboard
+          <Link href="/" className="text-indigo-400 hover:underline">
+            ← Main Dashboard
           </Link>
           <span className="text-slate-600">|</span>
           <span className="font-semibold text-slate-400">STATUS:</span>
@@ -524,7 +565,7 @@ export default function OutlookPage() {
           </button>
 
           <span>
-            Total IDs: <b className="text-amber-400">{allVaultAccounts.length}</b>
+            Total IDs: <b className="text-amber-400">{vaultAccounts.length}</b>
           </span>
           <span>
             Active: <b className="text-emerald-400">{selectedAcc?.senderName || selectedAcc?.email || "None"}</b>
@@ -565,7 +606,7 @@ export default function OutlookPage() {
         <div className="w-64 border-r border-slate-800 p-3 flex flex-col bg-slate-950 shrink-0">
           <div className="flex justify-between items-center mb-2 px-1">
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Accounts ({allVaultAccounts.length})
+              Accounts ({vaultAccounts.length})
             </h2>
             {accountSearch && (
               <span className="text-[10px] bg-indigo-950 text-indigo-300 px-1.5 py-0.5 rounded font-mono border border-indigo-800">
@@ -586,7 +627,7 @@ export default function OutlookPage() {
 
           <div className="flex-1 overflow-y-auto space-y-1 pr-1">
             {loadingAccounts ? (
-              <div className="text-xs text-slate-500 p-2 animate-pulse">Loading accounts...</div>
+              <div className="text-xs text-slate-500 p-2 animate-pulse">Loading accounts from Vault...</div>
             ) : filteredAccounts.length === 0 ? (
               <div className="text-xs text-slate-500 p-3 text-center">No matching account found.</div>
             ) : (
@@ -770,7 +811,6 @@ export default function OutlookPage() {
         <div className="flex-1 flex flex-col bg-slate-950 min-w-0">
           {selectedEmail ? (
             <>
-              {/* 🎯 टॉप हेडर: सब्जेक्ट, सेंडर और हिंदी अनुवाद */}
               <div className="p-3 border-b border-slate-800 bg-slate-900/60 flex items-center justify-between gap-3 shrink-0">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 mb-0.5 flex-wrap">
@@ -791,7 +831,6 @@ export default function OutlookPage() {
                   </div>
                 </div>
 
-                {/* 🇮🇳 हिंदी अनुवाद बटन */}
                 <button
                   onClick={handleTranslateToHindi}
                   disabled={translating}
@@ -805,9 +844,7 @@ export default function OutlookPage() {
                 </button>
               </div>
 
-              {/* 🌟 सब्जेक्ट और हिंदी अनुवाद के जस्ट नीचे: फॉलो-अप शेड्यूल + AI स्मार्ट रिप्लाई */}
               <div className="px-4 py-2 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between gap-3 shrink-0 flex-wrap">
-                {/* ⏰ फॉलो-अप शेड्यूल */}
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider">
                     Follow-up:
@@ -819,7 +856,6 @@ export default function OutlookPage() {
                   />
                 </div>
 
-                {/* 🤖 Smart AI Reply Buttons (⚡ Quick Reply & ✨ AI Thread Reply) */}
                 <div className="flex items-center gap-2">
                   <SmartReplyActions
                     machineId={machineId}
@@ -861,12 +897,10 @@ export default function OutlookPage() {
                 </div>
               )}
 
-              {/* ईमेल की मुख्य बॉडी */}
               <div className="flex-1 p-4 overflow-y-auto whitespace-pre-wrap text-xs text-slate-300 leading-relaxed font-sans bg-slate-950/20">
                 {selectedEmail.fullText || selectedEmail.snippet}
               </div>
 
-              {/* 🎯 नीचे का ड्राफ्ट और सेंड बॉक्स */}
               <div className="p-3 border-t border-slate-800 bg-slate-900/90 flex flex-col gap-2 shrink-0">
                 <div className="flex justify-between items-center">
                   <div className="text-[11px] text-slate-400">

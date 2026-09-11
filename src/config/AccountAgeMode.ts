@@ -1,3 +1,4 @@
+// app/config/AccountAgeMode.ts
 export type AccountAgeMode = "AGED" | "STANDARD" | "FRESH";
 
 export interface ModeConfig {

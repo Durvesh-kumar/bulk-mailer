@@ -6,7 +6,7 @@ import { ProfileTier, SmtpAccount, SESSION_TOKEN_KEY, TIER_ORDER } from "@/types
 
 export function useVaultManager(machineId: string) {
   const [activeTierAccounts, setActiveTierAccounts] = useState<SmtpAccount[]>([]);
-  const [activeTab, setActiveTab] = useState<ProfileTier>("YEAR_2");
+  const [activeTab, setActiveTab] = useState<ProfileTier>("CURRENT");
   const [loading, setLoading] = useState(false);
 
   const [revealedPasswords, setRevealedPasswords] = useState<Record<string, string>>({});
@@ -16,7 +16,6 @@ export function useVaultManager(machineId: string) {
   const fetchOnlyActiveTier = async (tier: ProfileTier) => {
     if (!machineId) return;
     setLoading(true);
-    setActiveTierAccounts([]);
 
     try {
       const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
@@ -143,7 +142,8 @@ export function useVaultManager(machineId: string) {
     });
 
     if (res.ok) {
-      fetchOnlyActiveTier(activeTab);
+      // ⚡ स्थानीय राज्य से तुरंत हटाकर या अपडेट करके री-रेंडर बचाएं
+      setActiveTierAccounts((prev) => prev.filter((acc) => acc._id !== accountId));
     } else {
       const data = await res.json();
       alert(data.error || "Failed to upgrade tier");
@@ -161,7 +161,8 @@ export function useVaultManager(machineId: string) {
     });
 
     if (res.ok) {
-      fetchOnlyActiveTier(activeTab);
+      // ⚡ बिना सर्वर से दोबारा फेच किए सीधे लोकल लिस्ट से डिलीट करें
+      setActiveTierAccounts((prev) => prev.filter((acc) => acc._id !== accountId));
     } else {
       const data = await res.json();
       alert(data.error || "Failed to delete account");

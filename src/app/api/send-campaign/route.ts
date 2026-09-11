@@ -86,6 +86,7 @@ export async function POST(req: Request) {
     const cleanHeaderName = String(senderName || "").trim();
     const finalSignoffName = customSignoffName?.trim().length ? customSignoffName.trim() : cleanHeaderName;
 
+    // Fresh Transporter per dispatch (No connection pooling to prevent Gmail IP bans)
     const getFreshTransporter = () =>
       nodemailer.createTransport({
         host: "smtp.gmail.com",
@@ -111,6 +112,7 @@ export async function POST(req: Request) {
             email,
             status: "FAILED",
             error: "Sender Authentication Failed",
+            bounceCode: 535,
           })),
         },
         { status: 401 }
@@ -140,7 +142,7 @@ export async function POST(req: Request) {
     // 7. Dispatch loop
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
-      if (isQuotaHit) break;
+      if (isQuotaHit || badRecipientDetected) break;
 
       const recipientName = getNameFromEmail(recipientEmail);
       const dynamicGreeting =
@@ -163,9 +165,9 @@ export async function POST(req: Request) {
       } catch (err: any) {
         const errMessage = String(err?.message || "").toLowerCase();
         const errResponse = String(err?.response || "").toLowerCase();
-        const respCode = err?.responseCode || 0;
+        const respCode = Number(err?.responseCode) || 0;
 
-        // A. Sender Daily Quota Reached
+        // A. 🛑 Sender Daily Quota Reached (Google 5.4.5 Limit)
         const isQuotaErr = respCode === 550 && /5\.4\.5|quota|limit|daily limit/i.test(errMessage + errResponse);
         if (isQuotaErr) {
           isQuotaHit = true;
@@ -173,15 +175,17 @@ export async function POST(req: Request) {
             email: recipientEmail,
             status: "FAILED",
             error: "Sender daily quota exceeded (Google 5.4.5 Daily Limit Reached).",
+            bounceCode: 550,
           });
           break;
         }
 
-        // B. 🎯 Recipient-Side Handshake Rejection (Bad Mailbox / Does Not Exist / Syntax Error)
+        // B. 🛑 Recipient-Side Handshake Rejection (550, 553, 501, 552, 554)
         const isBadRecipient =
           respCode === 550 ||
           respCode === 553 ||
           respCode === 501 ||
+          respCode === 552 ||
           respCode === 554 ||
           /user not found|does not exist|mailbox unavailable|invalid recipient|no such user|relay denied|syntax error/i.test(
             errMessage + errResponse
@@ -189,33 +193,48 @@ export async function POST(req: Request) {
 
         if (isBadRecipient) {
           badRecipientDetected = true;
+          // सटीक बाउंस कोड ताकि डैशबोर्ड के चार्ट में एकदम सही संख्या दिखे
+          const cleanBounceCode = respCode || (errMessage.includes("553") ? 553 : 550);
           logs.push({
             email: recipientEmail,
             status: "FAILED",
             error: err?.response || "Recipient address not found or rejected by receiving mail server.",
-            bounceCode: respCode || 550,
+            bounceCode: cleanBounceCode,
             isBadRecipient: true,
           });
+          // खराब लीड मिलते ही तुरंत बाहर निकलें ताकि वर्कर इसे स्वैप कर सके
+          break;
+        }
+
+        // C. 🛑 Rate Limited / Connection Blocked (421)
+        const isRateLimited = respCode === 421 || /try again later|service unavailable|too many connections/i.test(errMessage + errResponse);
+        if (isRateLimited) {
+          logs.push({
+            email: recipientEmail,
+            status: "FAILED",
+            error: "Temporary Rate Limit or Greylisting (421): " + (err?.message || "Service unavailable"),
+            bounceCode: 421,
+          });
         } else {
-          // C. General Delivery / Network Failure
+          // D. General Delivery Failure
           logs.push({
             email: recipientEmail,
             status: "FAILED",
             error: "Delivery failed: " + (err?.message || "Unknown error"),
-            bounceCode: respCode || "NETWORK_ERROR",
+            bounceCode: respCode || "OTHER",
           });
         }
       } finally {
         currentTransporter.close();
       }
 
-      if (isQuotaHit) break;
+      if (isQuotaHit || badRecipientDetected) break;
       if (rule && i < recipients.length - 1) {
         await sleepRandom(rule.minDelay, rule.maxDelay);
       }
     }
 
-    // 8. Return comprehensive diagnostic response
+    // 8. Return comprehensive diagnostic response for Dashboard & Worker Telemetry
     return NextResponse.json({
       report: logs,
       sessionToken: guard.sessionToken,

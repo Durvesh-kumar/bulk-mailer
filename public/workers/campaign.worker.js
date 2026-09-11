@@ -4,6 +4,9 @@ let isRunning = false;
 let isPaused = false;
 let isStopRequested = false;
 
+// चालू रनिंग स्टेट का ग्लोबल रेफरेंस (APPEND_LEADS के लिए)
+let activeRunningParams = null;
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const sleepRandomDelay = (min = 3500, max = 6500) => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
@@ -22,7 +25,7 @@ let senderProcessedTimes = {};
 let completedSendersCount = 0;
 let senderSessionState = {};
 
-// 📊 टेलीमेट्री व डायग्नोस्टिक्स
+// 📊 टेलीमेट्री व डायग्नोस्टिक्स (डैशबोर्ड से 100% मैप्ड)
 let diagnosticTelemetry = {
   code550: 0,
   code552: 0,
@@ -49,6 +52,16 @@ function recordSenderMetric(email, type) {
   if (type === "WARMUP_SENT") senderHealthMap[key].warmupSent++;
   if (type === "SPAM_RESCUED") senderHealthMap[key].spamRescued++;
   if (type === "BOUNCE") senderHealthMap[key].bouncesHit++;
+}
+
+function recordDiagnosticCode(code) {
+  const numCode = Number(code) || 0;
+  if (numCode === 550) diagnosticTelemetry.code550++;
+  else if (numCode === 552) diagnosticTelemetry.code552++;
+  else if (numCode === 553 || numCode === 501) diagnosticTelemetry.code553++;
+  else if (numCode === 554) diagnosticTelemetry.code554++;
+  else if (numCode === 421) diagnosticTelemetry.code421++;
+  else diagnosticTelemetry.other++;
 }
 
 function getSenderState(email) {
@@ -120,7 +133,7 @@ async function startBackgroundPeerAuditor(allRawPeers, chunkSize = 4) {
   isAuditorFinished = true;
 }
 
-// 🎯 वेव रोटेशन अपडेटर (Current !== Previous)
+// 🎯 वेव रोटेशन अपडेटर
 function advanceWaveRoundIfNeeded(isNewRoundStarting, subjectList, templateList, fallbackTemplate) {
   const cleanSubs = (subjectList || []).map((s) => s.trim()).filter((s) => s.length > 0);
   const cleanTemps = (Array.isArray(templateList) && templateList.length > 0 ? templateList : [fallbackTemplate || ""])
@@ -167,7 +180,7 @@ function advanceWaveRoundIfNeeded(isNewRoundStarting, subjectList, templateList,
     self.postMessage({
       type: "LIVE_STATUS",
       payload: {
-        text: `🔄 [Wave Rotated to Round ${currentWaveIndex + 1}] Switched to Next Template & Subject (Current !== Previous).`,
+        text: `🔄 [Wave Rotated to Round ${currentWaveIndex + 1}] Switched to Next Template & Subject.`,
       },
     });
   }
@@ -217,7 +230,19 @@ setInterval(async () => {
   }
 }, 8000);
 
+// केवल इस्तेमाल हुए सेंडर्स का टाइम निकालने वाला हेल्पर
+function getOnlyUsedSendersTimes() {
+  const cleanTimes = {};
+  for (const [email, count] of Object.entries(senderSentCount)) {
+    if (count > 0 && senderProcessedTimes[email]) {
+      cleanTimes[email] = senderProcessedTimes[email];
+    }
+  }
+  return cleanTimes;
+}
+
 async function executeDispatch(params) {
+  activeRunningParams = params;
   let {
     currentQueue,
     sendersList,
@@ -252,7 +277,7 @@ async function executeDispatch(params) {
         areSendersExhausted: sendersList.length === 0,
         finalProcessed: currentProcessed,
         finalSuccess: currentSuccess,
-        senderProcessedTimes,
+        senderProcessedTimes: getOnlyUsedSendersTimes(),
         targetLotSize,
         diagnosticStats: diagnosticTelemetry,
         senderMetrics: senderHealthMap,
@@ -379,18 +404,14 @@ async function executeDispatch(params) {
 
     const data = await res.json();
 
-    // 🎯 3. डायनामिक लीड स्वैप (550 / 553 / 501 रिजेक्शन)
+    // 🎯 3. डायनामिक लीड स्वैप (550 / 553 / 501 / 552 / 554)
     if (data.shouldSwapLeadImmediately) {
       const updatedQueue = currentQueue.slice(1);
       const errReason = data.report?.[0]?.error || "Recipient address not found (550/501/553)";
       const bounceCode = data.report?.[0]?.bounceCode || 550;
 
       recordSenderMetric(activeEmail, "BOUNCE");
-      if (bounceCode === 550) diagnosticTelemetry.code550++;
-      else if (bounceCode === 553 || bounceCode === 501) diagnosticTelemetry.code553++;
-      else if (bounceCode === 552) diagnosticTelemetry.code552++;
-      else if (bounceCode === 554) diagnosticTelemetry.code554++;
-      else diagnosticTelemetry.other++;
+      recordDiagnosticCode(bounceCode);
 
       const newlyFailed = [{
         email: coldLead,
@@ -415,18 +436,45 @@ async function executeDispatch(params) {
         },
       });
 
-      if (updatedQueue.length > 0 && !isStopRequested && !isPaused) {
+      const updatedSenderSent = currentSenderCurrentSent + 1;
+      senderSentCount[activeEmail.toLowerCase()] = updatedSenderSent;
+      senderProcessedTimes[activeEmail.toLowerCase()] = new Date().toISOString();
+
+      let activePool = sendersList;
+      let nextIdx = (senderIdx + 1) % activePool.length;
+
+      // 🛑 सख्त लॉट साइज लिमिट चेक
+      if (updatedSenderSent >= targetLotSize) {
+        completedSendersCount += 1;
+        self.postMessage({ type: "SENDER_LOT_COMPLETED", email: activeEmail });
+        activePool = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
+        if (activePool.length > 0) {
+          nextIdx = senderIdx % activePool.length;
+        }
+      }
+
+      if (activePool.length === 0 || updatedQueue.length === 0) {
         return executeDispatch({
           ...params,
           currentQueue: updatedQueue,
+          sendersList: activePool,
           currentProcessed: currentProcessed + 1,
           currentSuccess: currentSuccess,
-          activeEmail,
-          activePass,
-          activeName,
-          senderIdx,
         });
       }
+
+      const nextSender = activePool[nextIdx];
+      return executeDispatch({
+        ...params,
+        currentQueue: updatedQueue,
+        sendersList: activePool,
+        senderIdx: nextIdx,
+        currentProcessed: currentProcessed + 1,
+        currentSuccess: currentSuccess,
+        activeEmail: nextSender.email,
+        activePass: nextSender.appPassword,
+        activeName: nextSender.senderName || "Colleague",
+      });
     }
 
     if (data.accountError || res.status === 400 || res.status === 401) {
@@ -465,7 +513,8 @@ async function executeDispatch(params) {
       recordSenderMetric(activeEmail, "COLD_SENT");
     } else {
       recordSenderMetric(activeEmail, "BOUNCE");
-      diagnosticTelemetry.other++;
+      // 🛑 सटीक कोड टेलीमेट्री में जोड़ें (421, 552 या अन्य)
+      recordDiagnosticCode(report.bounceCode || 0);
     }
 
     const newlyFailed = !isSuccess
@@ -501,6 +550,7 @@ async function executeDispatch(params) {
     let nextIdx = (senderIdx + 1) % activePool.length;
     let senderJustCompletedLot = false;
 
+    // 🛑 सख्त लॉट साइज लिमिट चेक
     if (updatedSenderSent >= targetLotSize) {
       senderJustCompletedLot = true;
       completedSendersCount += 1;
@@ -515,7 +565,7 @@ async function executeDispatch(params) {
       return executeDispatch({
         ...params,
         currentQueue: updatedQueue,
-        sendersList: [],
+        sendersList: activePool,
         currentProcessed: updatedTotalProcessed,
         currentSuccess: updatedTotalSuccess,
       });
@@ -596,6 +646,21 @@ async function executeDispatch(params) {
 self.onmessage = async (e) => {
   const { action, payload } = e.data;
 
+  // 🛑 1. बीच में नई लीड्स जोड़ने का नया लिसनर (Live Sync with UI)
+  if (action === "APPEND_LEADS") {
+    const { newLeads } = payload;
+    if (Array.isArray(newLeads) && newLeads.length > 0 && activeRunningParams) {
+      activeRunningParams.currentQueue = [...activeRunningParams.currentQueue, ...newLeads];
+      self.postMessage({
+        type: "LIVE_STATUS",
+        payload: {
+          text: `📥 [Queue Appended] +${newLeads.length} leads added to active queue. Total left: ${activeRunningParams.currentQueue.length}`,
+        },
+      });
+    }
+    return;
+  }
+
   if (action === "START") {
     isRunning = true;
     isPaused = false;
@@ -644,13 +709,19 @@ self.onmessage = async (e) => {
     isStopRequested = true;
     isPaused = true;
     isRunning = false;
-    self.postMessage({ type: "PAUSED" });
+    self.postMessage({ 
+      type: "PAUSED",
+      payload: {
+        senderProcessedTimes: getOnlyUsedSendersTimes()
+      }
+    });
   }
 
   if (action === "RESET") {
     isStopRequested = true;
     isRunning = false;
     isPaused = false;
+    activeRunningParams = null;
     currentWaveIndex = 0;
     lastWaveTemplate = "";
     lastWaveSubject = "";

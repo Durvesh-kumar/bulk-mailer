@@ -47,7 +47,7 @@ function formatDuration(ms: number): string {
 export default function Home() {
   const { loadingLicense, isSuspended, userType, expiryDate, machineId, appDomain, setIsSuspended } = useLicenseGuard();
 
-  const [selectedTier, setSelectedTier] = useState<ProfileTier>("YEAR_2");
+  const [selectedTier, setSelectedTier] = useState<ProfileTier>("CURRENT");
   const [isVaultLoaded, setIsVaultLoaded] = useState(false);
 
   // Active Sender State
@@ -66,7 +66,7 @@ export default function Home() {
   const [rawSheetData, setRawSheetData] = useState("");
   const [subjectList, setSubjectList] = useState<string[]>([""]);
   
-  // ⚡ MULTI-TEMPLATE STATE (Min 1, Max 3)
+  // Multi-Template State
   const [templateList, setTemplateList] = useState<string[]>([""]);
   const [activeTemplateTab, setActiveTemplateTab] = useState<number>(0);
 
@@ -94,7 +94,7 @@ export default function Home() {
   const [cooldownRemainingMs, setCooldownRemainingMs] = useState<number | null>(null);
   const [cooldownTierLabel, setCooldownTierLabel] = useState<string>("");
 
-  // 📊 Live Telemetry & Diagnostics Modal State
+  // Live Telemetry & Diagnostics Modal State
   const [showAnalyticsDashboard, setShowAnalyticsDashboard] = useState(false);
   const [diagnosticStats, setDiagnosticStats] = useState({
     code550: 0,
@@ -130,6 +130,20 @@ export default function Home() {
   const domEtaRef = useRef<HTMLSpanElement>(null);
 
   const workerRef = useRef<Worker | null>(null);
+  const dnsWorkerRef = useRef<Worker | null>(null);
+
+  // केवल उन्हीं सेंडर्स का टाइमस्टैम्प अपडेट करें जिनका मेल वास्तव में प्रोसेस हुआ
+  const syncSenderTimestamps = async (usedTimes: Record<string, string>) => {
+    if (!usedTimes || Object.keys(usedTimes).length === 0 || !machineId) return;
+    try {
+      const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+      await fetch("/api/smtp-vault/sync-timestamps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-session-token": savedSession },
+        body: JSON.stringify({ machineId, timestamps: usedTimes }),
+      });
+    } catch (_) {}
+  };
 
   useEffect(() => {
     try {
@@ -255,7 +269,14 @@ export default function Home() {
         }
       }
 
-      if (type === "PAUSE_REQUIRED" || type === "PAUSED") {
+      if (type === "PAUSED") {
+        setLoading(false);
+        if (payload?.senderProcessedTimes) {
+          syncSenderTimestamps(payload.senderProcessedTimes);
+        }
+      }
+
+      if (type === "PAUSE_REQUIRED") {
         setLoading(false);
         if (message) alert(message);
       }
@@ -266,13 +287,18 @@ export default function Home() {
         if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
         if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
 
+        // केवल प्रयुक्त सेंडर्स का टाइमस्टैम्प अपडेट करें
+        if (payload.senderProcessedTimes) {
+          syncSenderTimestamps(payload.senderProcessedTimes);
+        }
+
         if (payload.isQueueEmpty) {
           setIsCampaignStarted(false);
           localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
           setRawSheetData("");
           setShowAnalyticsDashboard(true);
         } else if (payload.areSendersExhausted) {
-          alert("All active sender accounts have reached their daily maximum lot limit.");
+          alert("All active sender accounts have reached their specified lot limit.");
         }
       }
 
@@ -291,8 +317,9 @@ export default function Home() {
 
     return () => {
       workerRef.current?.terminate();
+      dnsWorkerRef.current?.terminate();
     };
-  }, [setIsSuspended]);
+  }, [setIsSuspended, machineId]);
 
   const handleAddSubjectField = () => {
     if (subjectList.length < 5) setSubjectList([...subjectList, ""]);
@@ -370,7 +397,8 @@ export default function Home() {
     }
 
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    const targetLotSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+    // उपयोगकर्ता द्वारा सेट किया गया लॉट साइज ही इस्तेमाल होगा
+    const targetLotSize = batchSize > 0 ? batchSize : DEFAULT_BATCH_SIZE;
 
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
 
@@ -427,7 +455,7 @@ export default function Home() {
     setLoading(true);
     const currentSender = inMemorySenders[currentSenderIndex % inMemorySenders.length] || inMemorySenders[0];
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    const targetLotSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+    const targetLotSize = batchSize > 0 ? batchSize : DEFAULT_BATCH_SIZE;
     const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
     const adminKey = sessionStorage.getItem("admin_session_key") || "inboxsend_mesh_secret_2026";
     const validTemplates = templateList.map((t) => t.trim()).filter((t) => t.length > 0);
@@ -501,8 +529,14 @@ export default function Home() {
     }
   };
 
+  // टियर बदलने पर रीसेट और फ्रेश लोड
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
+
+    if (workerRef.current) {
+      workerRef.current.postMessage({ action: "RESET" });
+    }
+
     setLoading(true);
     const tierLabel = TIER_META[tier]?.label || tier;
     setProgressStatus(`Loading ${tierLabel} accounts...`);
@@ -562,6 +596,7 @@ export default function Home() {
     await handleLoadTierAccounts(tierToSwitch);
   };
 
+  // रनिंग कैंपेन में नई लीड्स जोड़ना
   const handleAppendMoreLeads = (e: React.FormEvent) => {
     e.preventDefault();
     if (!appendLeadInput.trim()) return;
@@ -572,30 +607,40 @@ export default function Home() {
       return;
     }
 
-    setPendingEmails((prevQueue) => {
-      const combined = [...prevQueue, ...result.validEmails];
-      const uniqueQueue = Array.from(new Set(combined));
-      localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(uniqueQueue));
-      return uniqueQueue;
+    const existingSet = new Set(pendingEmails.map((email) => email.toLowerCase()));
+    const freshLeads = result.validEmails.filter((email) => !existingSet.has(email.toLowerCase()));
+
+    if (freshLeads.length === 0) {
+      alert("All these leads are already in the queue!");
+      return;
+    }
+
+    const updatedQueue = [...pendingEmails, ...freshLeads];
+
+    setPendingEmails(updatedQueue);
+    setInitialTotalCount((prev) => prev + freshLeads.length);
+    setRawSheetData(updatedQueue.join("\n"));
+    localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(updatedQueue));
+
+    // वर्कर को नई लीड्स भेजें
+    workerRef.current?.postMessage({
+      action: "APPEND_LEADS",
+      payload: { newLeads: freshLeads },
     });
 
-    setInitialTotalCount((prev) => prev + result.validEmails.length);
     setAppendLeadInput("");
     setIsAppendModalOpen(false);
-    alert(`Successfully added ${result.validEmails.length} new clean lead(s) to the active queue!`);
+    alert(`Successfully added ${freshLeads.length} new clean lead(s) to the active queue!`);
   };
 
   const handleBatchSizeChange = (val: string) => {
     if (val === "") { setBatchSize(0); return; }
     const num = parseInt(val, 10);
-    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-    if (!isNaN(num)) setBatchSize(Math.min(num, maxLimit));
+    if (!isNaN(num)) setBatchSize(Math.max(1, num));
   };
 
   const handleBatchSizeBlur = () => {
-    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
     if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) setBatchSize(DEFAULT_BATCH_SIZE);
-    else if (batchSize > maxLimit) setBatchSize(maxLimit);
   };
 
   const handleQuickClean = () => {
@@ -624,25 +669,81 @@ export default function Home() {
     }
   };
 
-  const handleDnsMxVerify = async () => {
-    if (!rawSheetData.trim()) {
+  // ⚡ DNS MX चेकर वर्कर कॉल: लाइव प्रोग्रेस और इनपुट बॉक्स से फ़ेल लीड्स को बाहर निकालना
+  const handleDnsMxVerify = () => {
+    const input = (rawSheetData || "").trim();
+    if (!input) {
       alert("Please paste leads first to verify DNS/MX records.");
       return;
     }
 
-    const preCleaned = cleanAndFilterLeads(rawSheetData);
+    const preCleaned = cleanAndFilterLeads(input);
     if (preCleaned.validEmails.length === 0) {
       alert("No valid email syntax found to verify.");
       return;
     }
 
     setIsDnsChecking(true);
-    setDnsProgressText("Verifying MX records and hostnames...");
-    setTimeout(() => {
-      setIsDnsChecking(false);
-      setDnsProgressText("");
-      setRawSheetData(preCleaned.validEmails.join("\n"));
-    }, 1200);
+    setDnsProgressText(`Verifying 0/${preCleaned.validEmails.length}...`);
+
+    if (dnsWorkerRef.current) dnsWorkerRef.current.terminate();
+    dnsWorkerRef.current = new Worker("/workers/lead-cleaner.worker.js");
+
+    const verifiedValidList: string[] = [];
+    const verifiedFailedList: RejectedEmailItem[] = [];
+
+    if (preCleaned.rejectedList.length > 0) {
+      verifiedFailedList.push(...preCleaned.rejectedList);
+    }
+
+    dnsWorkerRef.current.onmessage = (e) => {
+      const { type, processedSoFar, total, results } = e.data;
+
+      if (type === "CHUNK_PROCESSED") {
+        setDnsProgressText(`Verifying ${processedSoFar}/${total}...`);
+        results.forEach((item: any) => {
+          if (item.valid) {
+            verifiedValidList.push(item.email);
+          } else {
+            verifiedFailedList.push({
+              email: item.email,
+              reason: item.reason || item.message || "MX_RECORD_MISSING",
+              category: "SYNTAX_ERROR",
+            });
+          }
+        });
+      }
+
+      if (type === "ALL_VERIFIED") {
+        setIsDnsChecking(false);
+        setDnsProgressText("");
+
+        // 🛑 केवल वैध लीड्स इनपुट बॉक्स और क्यू में रहेंगी (फ़ेल लीड्स बाहर निकल गईं)
+        const cleanString = verifiedValidList.join("\n");
+        setRawSheetData(cleanString);
+        setPendingEmails(verifiedValidList);
+        setInitialTotalCount(verifiedValidList.length);
+
+        if (verifiedFailedList.length > 0) {
+          setRejectedData(verifiedFailedList);
+          setRejectedStats({
+            total: verifiedFailedList.length,
+            dups: preCleaned.duplicatesCount,
+            syntax: verifiedFailedList.length,
+            temp: preCleaned.disposableCount,
+          });
+          setShowRejectedModal(true);
+        }
+
+        alert(`DNS MX Verification complete! ${verifiedValidList.length} verified valid leads ready.`);
+        dnsWorkerRef.current?.terminate();
+      }
+    };
+
+    dnsWorkerRef.current.postMessage({
+      action: "START_VERIFY",
+      payload: { emails: preCleaned.validEmails, chunkSize: 5 },
+    });
   };
 
   const handleCopyFailedDetailed = () => {

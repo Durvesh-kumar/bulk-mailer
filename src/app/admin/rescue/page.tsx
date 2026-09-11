@@ -1,7 +1,7 @@
 // src/app/admin/rescue/page.tsx
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 
 const RESCUE_STATS_KEY = "inboxsend_rescue_sentinel_stats_v4";
@@ -39,6 +39,8 @@ export default function AdminRescueSentinelDashboard() {
   });
 
   const [logs, setLogs] = useState<string[]>([]);
+  
+  // ⚡ Refs to prevent closure staleness in asynchronous execution loops
   const isRunningRef = useRef(metrics.isRunning);
   const queueRef = useRef(queue);
   const adminKeyRef = useRef(adminKey);
@@ -83,6 +85,7 @@ export default function AdminRescueSentinelDashboard() {
   }, []);
 
   const saveQueueState = (newQ: AccountNode[]) => {
+    queueRef.current = newQ;
     setQueue(newQ);
     if (typeof window !== "undefined") {
       localStorage.setItem(RESCUE_QUEUE_KEY, JSON.stringify(newQ));
@@ -125,14 +128,14 @@ export default function AdminRescueSentinelDashboard() {
           sessionStorage.setItem("admin_session_key", key.trim());
         }
 
-        // LocalStorage से अगर पुरानी कतार बची हो तो उठाएं (जब तक forceFresh न हो)
         if (!forceFresh) {
           const savedQueue = localStorage.getItem(RESCUE_QUEUE_KEY);
           if (savedQueue) {
             try {
               const parsedQ = JSON.parse(savedQueue);
               if (Array.isArray(parsedQ) && parsedQ.length > 0) {
-                setQueue(parsedQ);
+                saveQueueState(parsedQ);
+                setAuthLoading(false);
                 return;
               }
             } catch (_) {}
@@ -155,7 +158,7 @@ export default function AdminRescueSentinelDashboard() {
     }
   };
 
-  // 🎯 सुरक्षित 3.5s-6.5s रैंडम डिले लूप
+  // 🎯 सुरक्षित 3.5s-6.5s रैंडम डिले लूप (Fully Synced with Refs)
   useEffect(() => {
     if (!metrics.isRunning) return;
 
@@ -167,6 +170,7 @@ export default function AdminRescueSentinelDashboard() {
       const currentQ = queueRef.current;
       if (currentQ.length === 0) {
         setMetrics((prev) => ({ ...prev, isRunning: false }));
+        isRunningRef.current = false;
         setLogs((prev) => [
           `[${new Date().toLocaleTimeString()}] 🏁 COMPLETE: All accounts scanned. Auto-Stopped.`,
           ...prev.slice(0, 49),
@@ -187,7 +191,10 @@ export default function AdminRescueSentinelDashboard() {
         });
 
         const data = await res.json();
-        const updatedQ = currentQ.slice(1);
+        
+        // ⚡ Ensure we slice from the latest current queue ref
+        const latestQ = queueRef.current;
+        const updatedQ = latestQ.slice(1);
         saveQueueState(updatedQ);
 
         if (data.success) {
@@ -215,8 +222,10 @@ export default function AdminRescueSentinelDashboard() {
           ]);
         }
       } catch (err: any) {
-        const updatedQ = currentQ.slice(1);
+        const latestQ = queueRef.current;
+        const updatedQ = latestQ.slice(1);
         saveQueueState(updatedQ);
+        
         updateMetricsState((prev) => ({
           ...prev,
           totalScanned: prev.totalScanned + 1,
@@ -244,11 +253,12 @@ export default function AdminRescueSentinelDashboard() {
   }, [metrics.isRunning]);
 
   const toggleEngine = () => {
-    if (!metrics.isRunning && queue.length === 0) {
+    if (!metrics.isRunning && queueRef.current.length === 0) {
       alert("Queue is empty! Click 'Reload DB Pool' to start fresh scan.");
       return;
     }
     const nextState = !metrics.isRunning;
+    isRunningRef.current = nextState;
     setMetrics((prev) => ({ ...prev, isRunning: nextState }));
     setLogs((prev) => [
       `[${new Date().toLocaleTimeString()}] 🛡️ Rescue Sentinel ${nextState ? "🟢 STARTED (3.5s-6.5s Jitter)" : "🔴 STOPPED"}`,
@@ -270,7 +280,7 @@ export default function AdminRescueSentinelDashboard() {
       localStorage.removeItem(RESCUE_STATS_KEY);
       localStorage.removeItem(RESCUE_QUEUE_KEY);
     }
-    setQueue([]);
+    saveQueueState([]);
     setMetrics({
       isRunning: false,
       totalScanned: 0,
@@ -279,6 +289,7 @@ export default function AdminRescueSentinelDashboard() {
       totalFailed: 0,
       totalInitialPool: 0,
     });
+    isRunningRef.current = false;
     setLogs([`[${new Date().toLocaleTimeString()}] 🧹 LocalStorage Reset.`]);
     verifyAndFetchPool(adminKey, true);
   };
