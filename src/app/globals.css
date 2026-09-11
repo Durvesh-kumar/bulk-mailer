@@ -1,11 +1,9 @@
+/* src/app/globals.css */
 @import "tailwindcss";
 
 :root {
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
@@ -16,6 +14,8 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
   }
 }
 
@@ -23,4 +23,50 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ================= TOTAL SCROLLBAR & SPINNER HIDING ================= */
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none !important;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+  }
+}
+
+/* 1. ग्लोबल HTML, Body और सभी डिव्स/टेक्स्टएरिया से स्क्रॉल बार छुपाना */
+html, body {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+html::-webkit-scrollbar, 
+body::-webkit-scrollbar {
+  display: none !important;
+}
+
+textarea, input, div, select, span {
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
+}
+
+textarea::-webkit-scrollbar, 
+input::-webkit-scrollbar, 
+div::-webkit-scrollbar, 
+select::-webkit-scrollbar {
+  display: none !important;
+}
+
+/* 2. नंबर इनपुट बॉक्स (जैसे Lot Size) के अप-डाउन एरो और स्पिनर्स को पूरी तरह से हटाना */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none !important;
+  margin: 0 !important;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield !important;
 }

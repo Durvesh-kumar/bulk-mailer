@@ -8,8 +8,9 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   template: string;
+  templates?: string[]; // ⚡ मल्टी-टेम्पलेट सपोर्ट
   subject?: string;
-  subjects?: string[];
+  subjects?: string[]; // ⚡ मल्टी-सब्जेक्ट सपोर्ट
   senderName: string;
   customSignoffName: string;
 }
@@ -18,6 +19,7 @@ export default function SpintaxPreviewModal({
   isOpen,
   onClose,
   template,
+  templates,
   subject,
   subjects,
   senderName,
@@ -27,7 +29,7 @@ export default function SpintaxPreviewModal({
 
   const pickRandom = (arr: string[]): string => arr[Math.floor(Math.random() * arr.length)];
 
-  // 🎲 Spintax + Subject Rotation Preview Generator
+  // 🎲 Spintax + Multi-Subject + Multi-Template Preview Generator
   const generateSamples = useCallback(() => {
     const cleanHeaderName = (senderName || "Team").trim();
     const finalSignoffName =
@@ -48,7 +50,7 @@ export default function SpintaxPreviewModal({
       return resolved;
     };
 
-    // सभी एक्टिव और नॉन-एम्प्टी सब्जेक्ट्स इकट्ठा करें
+    // 1. सभी एक्टिव और नॉन-एम्प्टी सब्जेक्ट्स इकट्ठा करें
     let allSubjects: string[] = [];
     if (subjects && Array.isArray(subjects)) {
       allSubjects = subjects.map((s) => s.trim()).filter((s) => s.length > 0);
@@ -56,32 +58,61 @@ export default function SpintaxPreviewModal({
     if (allSubjects.length === 0 && subject && subject.trim().length > 0) {
       allSubjects = [subject.trim()];
     }
+    if (allSubjects.length === 0) {
+      allSubjects = ["Quick check-in regarding partnership"];
+    }
+
+    // 2. सभी एक्टिव और नॉन-एम्प्टी टेम्पलेट्स इकट्ठा करें (Multi-Template)
+    let allTemplates: string[] = [];
+    if (templates && Array.isArray(templates)) {
+      allTemplates = templates.map((t) => (t || "").trim()).filter((t) => t.length > 0);
+    }
+    if (allTemplates.length === 0 && template && template.trim().length > 0) {
+      allTemplates = [template.trim()];
+    }
+    if (allTemplates.length === 0) {
+      allTemplates = ["Hi there, hope you are doing well."];
+    }
 
     const samplesList = [];
     let previousSubjectIndex = -1;
+    let previousTemplateIndex = -1;
 
+    // 4 अलग-अलग вариации (Variations) सिमुलेट करें
     for (let i = 0; i < 4; i++) {
       const randomGreeting = pickRandom(GREETINGS);
       const randomOpener = pickRandom(OPENERS);
       const randomSignOff = pickRandom(SIGN_OFFS);
 
-      const resolvedBody = resolveSpintax(template);
-
-      // 🎯 नो-रिपीट सब्जेक्ट रोटेशन इंजन
-      let rawSelectedSubject = "(No Subject)";
-      if (allSubjects.length === 1) {
-        rawSelectedSubject = allSubjects[0];
-      } else if (allSubjects.length === 2) {
-        previousSubjectIndex = previousSubjectIndex === 0 ? 1 : 0;
-        rawSelectedSubject = allSubjects[previousSubjectIndex];
-      } else if (allSubjects.length > 2) {
-        let nextIdx: number;
+      // 🎯 No-Repeat Template Rotation Engine
+      let templateIdx = 0;
+      if (allTemplates.length === 1) {
+        templateIdx = 0;
+      } else if (allTemplates.length === 2) {
+        templateIdx = previousTemplateIndex === 0 ? 1 : 0;
+      } else {
         do {
-          nextIdx = Math.floor(Math.random() * allSubjects.length);
-        } while (nextIdx === previousSubjectIndex);
-        previousSubjectIndex = nextIdx;
-        rawSelectedSubject = allSubjects[nextIdx];
+          templateIdx = Math.floor(Math.random() * allTemplates.length);
+        } while (templateIdx === previousTemplateIndex && allTemplates.length > 1);
       }
+      previousTemplateIndex = templateIdx;
+      const rawSelectedTemplate = allTemplates[templateIdx];
+
+      const resolvedBody = resolveSpintax(rawSelectedTemplate);
+
+      // 🎯 No-Repeat Subject Rotation Engine
+      let subjectIdx = 0;
+      if (allSubjects.length === 1) {
+        subjectIdx = 0;
+      } else if (allSubjects.length === 2) {
+        subjectIdx = previousSubjectIndex === 0 ? 1 : 0;
+      } else {
+        do {
+          subjectIdx = Math.floor(Math.random() * allSubjects.length);
+        } while (subjectIdx === previousSubjectIndex && allSubjects.length > 1);
+      }
+      previousSubjectIndex = subjectIdx;
+      const rawSelectedSubject = allSubjects[subjectIdx];
 
       const resolvedSubject = resolveSpintax(rawSelectedSubject);
       const sampleBody = `${randomGreeting}\n\n${randomOpener}\n\n${resolvedBody || "(Your message body will appear here)"}\n\n${randomSignOff}\n\n${finalSignoffName}`;
@@ -89,15 +120,16 @@ export default function SpintaxPreviewModal({
       samplesList.push({
         subject: resolvedSubject,
         body: sampleBody,
-        subjectIndex: previousSubjectIndex >= 0 ? previousSubjectIndex + 1 : 1,
+        subjectIndex: subjectIdx + 1,
         totalSubjects: allSubjects.length,
+        templateIndex: templateIdx + 1,
+        totalTemplates: allTemplates.length,
       });
     }
 
     return samplesList;
-  }, [template, subject, subjects, senderName, customSignoffName]);
+  }, [template, templates, subject, subjects, senderName, customSignoffName]);
 
-  // ⚡ सारे React Hooks हमेशा सबसे ऊपर रहेंगे
   const [samples, setSamples] = useState(() => generateSamples());
 
   useEffect(() => {
@@ -111,11 +143,11 @@ export default function SpintaxPreviewModal({
     setSamples(generateSamples());
   };
 
-  // ⚡ Hooks के बाद ही Early Return होगा
   if (!isOpen) return null;
 
   const currentSample = samples[activeTab];
   const activeSubjectCount = (subjects && subjects.filter((s) => s.trim().length > 0).length) || (subject ? 1 : 0);
+  const activeTemplateCount = (templates && templates.filter((t) => t.trim().length > 0).length) || (template ? 1 : 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/80 backdrop-blur-md transition-all animate-fadeIn">
@@ -128,22 +160,22 @@ export default function SpintaxPreviewModal({
               🎲
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-sm font-bold text-white tracking-wide">
-                  Spintax & Rotation Inspector
+                  Spintax & Multi-Template Rotation Inspector
                 </h3>
-                {activeSubjectCount > 1 ? (
+                {activeSubjectCount > 1 || activeTemplateCount > 1 ? (
                   <span className="text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 px-2 py-0.5 rounded-md font-mono font-bold">
-                    🔄 {activeSubjectCount} Subjects Rotator Active
+                    🔄 {activeSubjectCount} Subs / {activeTemplateCount} Temps Active
                   </span>
                 ) : (
                   <span className="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded-md font-mono">
-                    Single Subject Mode
+                    Single Mode
                   </span>
                 )}
               </div>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Simulating exact layout with Greetings, Openers, No-Repeat Subject Rotation & Sign-offs
+                Simulating exact layout with Greetings, Openers, No-Repeat Subject & Body Rotation
               </p>
             </div>
           </div>
@@ -169,11 +201,9 @@ export default function SpintaxPreviewModal({
                 }`}
               >
                 <span>Variation #{idx + 1}</span>
-                {s.totalSubjects > 1 && (
-                  <span className="text-[9px] bg-indigo-900/60 text-indigo-300 px-1.5 py-0.2 rounded">
-                    S{s.subjectIndex}
-                  </span>
-                )}
+                <span className="text-[9px] bg-indigo-900/60 text-indigo-300 px-1.5 py-0.2 rounded font-mono">
+                  S{s.subjectIndex} • T{s.templateIndex}
+                </span>
               </button>
             ))}
           </div>
@@ -195,11 +225,9 @@ export default function SpintaxPreviewModal({
                   <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                     Resolved Subject Line
                   </label>
-                  {currentSample.totalSubjects > 1 && (
-                    <span className="text-[10px] text-indigo-400 font-mono">
-                      (Picked Slot #{currentSample.subjectIndex} of {currentSample.totalSubjects})
-                    </span>
-                  )}
+                  <span className="text-[10px] text-indigo-400 font-mono">
+                    (Subject Slot #{currentSample.subjectIndex} of {currentSample.totalSubjects})
+                  </span>
                 </div>
                 <div className="p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-white font-mono font-medium shadow-inner flex items-center justify-between">
                   <span className="truncate">{currentSample.subject || "(No Subject)"}</span>
@@ -208,9 +236,14 @@ export default function SpintaxPreviewModal({
               </div>
 
               <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
-                  Resolved Email Body (As Received by Lead with ctaConfig)
-                </label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    Resolved Email Body (With Template #{currentSample.templateIndex} of {currentSample.totalTemplates})
+                  </label>
+                  <span className="text-[10px] text-emerald-400 font-mono">
+                    Active Template T{currentSample.templateIndex}
+                  </span>
+                </div>
                 <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 whitespace-pre-wrap leading-relaxed shadow-inner min-h-[140px] font-sans">
                   {currentSample.body || "(No Body Content Provided)"}
                 </div>
@@ -226,7 +259,7 @@ export default function SpintaxPreviewModal({
         {/* Footer */}
         <div className="px-5 py-3 border-t border-slate-800/80 bg-slate-950/40 flex items-center justify-between">
           <span className="text-[11px] text-emerald-400 font-sans flex items-center gap-1">
-            <span>✨</span> 100% Synced with Backend ctaConfig & Subject Rotation
+            <span>✨</span> 100% Synced with Multi-Subject & Multi-Template Rotation Engine
           </span>
           <button
             onClick={onClose}

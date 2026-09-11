@@ -1,17 +1,16 @@
 // src/app/page.tsx
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
-import Link from "next/link";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import SuspendedScreen from "@/components/SuspendedScreen";
 import ReferralBanner from "@/components/ReferralBanner";
 import { AccountAgeMode, MODE_CONFIGS } from "@/config/AccountAgeMode";
 import RejectedLeadsModal from "@/components/modals/RejectedLeadsModal";
 import SpintaxPreviewModal from "@/components/modals/SpintaxPreviewModal";
+import CampaignAnalyticsDashboard from "@/components/dashboard/CampaignAnalyticsDashboard";
 import { cleanAndFilterLeads, RejectedEmailItem } from "@/lib/leadCleaner";
 import { useLicenseGuard } from "@/hook/useLicenseGuard";
-import { isSenderInCooldown, markSenderLotCompleted } from "@/utils/cooldown";
-import { InputField } from "@/components/ui/InputField";
+import { isSenderInCooldown } from "@/utils/cooldown";
 import {
   ProfileTier,
   SmtpAccount,
@@ -21,13 +20,29 @@ import {
   PENDING_QUEUE_STORAGE_KEY,
 } from "@/types/vault";
 
+// Sub-Components
+import HomeHeader from "@/components/home/HomeHeader";
+import CampaignStatsGrid from "@/components/home/CampaignStatsGrid";
+import LiveDashboard from "@/components/home/LiveDashboard";
+import AppendLeadsModal from "@/components/home/AppendLeadsModal";
+import CampaignForm from "@/components/home/CampignForm";
+import FailedLeadsModal from "@/components/home/FailedLeadsModel";
+
 const DEFAULT_BATCH_SIZE = 10;
 const MIN_ALLOWED_BATCH_SIZE = 1;
+const COOLDOWN_HOURS_MS = 24 * 60 * 60 * 1000;
 
-const sleepRandomDelay = (min = 3000, max = 4500) => {
-  const ms = Math.floor(Math.random() * (max - min + 1)) + min;
-  return new Promise((resolve) => setTimeout(resolve, ms));
-};
+function formatDuration(ms: number): string {
+  if (ms <= 0) return "Ready now";
+  const totalSecs = Math.floor(ms / 1000);
+  const hrs = Math.floor(totalSecs / 3600);
+  const mins = Math.floor((totalSecs % 3600) / 60);
+  const secs = totalSecs % 60;
+
+  if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
 
 export default function Home() {
   const { loadingLicense, isSuspended, userType, expiryDate, machineId, appDomain, setIsSuspended } = useLicenseGuard();
@@ -42,16 +57,19 @@ export default function Home() {
   const [showPassword, setShowPassword] = useState(false);
 
   const [inMemorySenders, setInMemorySenders] = useState<SmtpAccount[]>([]);
+  const [peerReceivers, setPeerReceivers] = useState<Array<{ email: string; senderName?: string; appPassword?: string }>>([]);
   const [currentSenderIndex, setCurrentSenderIndex] = useState<number>(0);
   const [sendersUsedRounds, setSendersUsedRounds] = useState<number>(0);
 
   // Campaign Form State
   const [batchSize, setBatchSize] = useState<number>(DEFAULT_BATCH_SIZE);
   const [rawSheetData, setRawSheetData] = useState("");
-  
-  // ⚡ MULTI-SUBJECT STATE (Min 1, Max 5)
   const [subjectList, setSubjectList] = useState<string[]>([""]);
-  const [template, setTemplate] = useState("");
+  
+  // ⚡ MULTI-TEMPLATE STATE (Min 1, Max 3)
+  const [templateList, setTemplateList] = useState<string[]>([""]);
+  const [activeTemplateTab, setActiveTemplateTab] = useState<number>(0);
+
   const [customSignoffName, setCustomSignoffName] = useState("");
   const [accountAgeMode, setAccountAgeMode] = useState<AccountAgeMode>("AGED");
 
@@ -59,36 +77,7 @@ export default function Home() {
   const [rotationMode, setRotationMode] = useState<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
   const [pauseAfterNSenders, setPauseAfterNSenders] = useState<number>(2);
 
-  // Live Mutable Refs
-  const isStopRequestedRef = useRef(false);
-  const subjectListRef = useRef<string[]>([""]);
-  const lastDispatchedSubjectRef = useRef<string>("");
-  const lotSubjectLockRef = useRef<{ senderEmail: string; subject: string } | null>(null);
-
-  const templateRef = useRef("");
-  const customSignoffNameRef = useRef("");
-  const rotationModeRef = useRef<"CONTINUOUS" | "EVERY_N_SENDERS" | "EVERY_SINGLE_SENDER">("CONTINUOUS");
-  const pauseAfterNSendersRef = useRef<number>(2);
-
-  const senderSentCountRef = useRef<Record<string, number>>({});
-  const senderProcessedTimesRef = useRef<Record<string, string>>({});
-  const completedSendersCountRef = useRef<number>(0);
-
-  // ⚡ HYBRID DIRECT DOM REFS & THROTTLING REFS (0% CPU LAG ON 4,000+ LEADS)
-  const domProcessedCountRef = useRef<HTMLSpanElement>(null);
-  const domDeliveredCountRef = useRef<HTMLSpanElement>(null);
-  const domFailedCountRef = useRef<HTMLSpanElement>(null);
-  const domLiveStatusRef = useRef<HTMLParagraphElement>(null);
-
-  const lastRenderedProcessedRef = useRef<number>(0);
-  const lastRenderedDeliveredRef = useRef<number>(0);
-
-  useEffect(() => { subjectListRef.current = subjectList; }, [subjectList]);
-  useEffect(() => { templateRef.current = template; }, [template]);
-  useEffect(() => { customSignoffNameRef.current = customSignoffName; }, [customSignoffName]);
-  useEffect(() => { rotationModeRef.current = rotationMode; }, [rotationMode]);
-  useEffect(() => { pauseAfterNSendersRef.current = pauseAfterNSenders; }, [pauseAfterNSenders]);
-
+  // Queue & Counter State
   const [pendingEmails, setPendingEmails] = useState<string[]>([]);
   const [initialTotalCount, setInitialTotalCount] = useState<number>(0);
   const [processedCount, setProcessedCount] = useState<number>(0);
@@ -97,11 +86,29 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [isDnsChecking, setIsDnsChecking] = useState(false);
   const [dnsProgressText, setDnsProgressText] = useState("");
-  
   const [progressStatus, setProgressStatus] = useState<string>("");
   const [isCampaignStarted, setIsCampaignStarted] = useState(false);
   const [lastBatchMessage, setLastBatchMessage] = useState<string>("");
 
+  // Live Cooldown State
+  const [cooldownRemainingMs, setCooldownRemainingMs] = useState<number | null>(null);
+  const [cooldownTierLabel, setCooldownTierLabel] = useState<string>("");
+
+  // 📊 Live Telemetry & Diagnostics Modal State
+  const [showAnalyticsDashboard, setShowAnalyticsDashboard] = useState(false);
+  const [diagnosticStats, setDiagnosticStats] = useState({
+    code550: 0,
+    code552: 0,
+    code553: 0,
+    code554: 0,
+    code421: 0,
+    other: 0,
+  });
+  const [senderMetrics, setSenderMetrics] = useState({});
+  const [totalWarmupCount, setTotalWarmupCount] = useState(0);
+  const [totalRescuedCount, setTotalRescuedCount] = useState(0);
+
+  // Modals State
   const [showRejectedModal, setShowRejectedModal] = useState(false);
   const [rejectedData, setRejectedData] = useState<RejectedEmailItem[]>([]);
   const [rejectedStats, setRejectedStats] = useState({ total: 0, dups: 0, syntax: 0, temp: 0 });
@@ -111,81 +118,188 @@ export default function Home() {
   const [copiedType, setCopiedType] = useState<"DETAILED" | "EMAILS" | null>(null);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
 
-  // ⚡ DYNAMIC REFILL & FOLDER SWITCH MODALS
   const [isAppendModalOpen, setIsAppendModalOpen] = useState(false);
   const [appendLeadInput, setAppendLeadInput] = useState("");
   const [selectedFolderToSwitch, setSelectedFolderToSwitch] = useState<ProfileTier>("YEAR_2");
 
-  // 🎯 SUBJECT ROTATION & NO-REPEAT CORE ENGINE (NO DEFAULT FALLBACK)
-  const getNextSubjectForDispatch = (currentSenderEmail: string): string => {
-    const rawList = subjectListRef.current;
-    // सिर्फ वही सब्जेक्ट्स उठाओ जो आपने खुद टाइप किए हैं
-    const cleanList = rawList.map((s) => s.trim()).filter((s) => s.length > 0);
+  // DOM Refs
+  const domProcessedCountRef = useRef<HTMLSpanElement>(null);
+  const domDeliveredCountRef = useRef<HTMLSpanElement>(null);
+  const domFailedCountRef = useRef<HTMLSpanElement>(null);
+  const domLiveStatusRef = useRef<HTMLParagraphElement>(null);
+  const domEtaRef = useRef<HTMLSpanElement>(null);
 
-    // ⚡ कड़ा नियम: अगर कोई सब्जेक्ट नहीं मिला तो डिफ़ॉल्ट कभी मत लगाओ, सीधे एरर थ्रो करो
-    if (cleanList.length === 0) {
-      throw new Error("Subject line is missing! Please enter a valid subject line.");
-    }
+  const workerRef = useRef<Worker | null>(null);
 
-    if (cleanList.length === 1) {
-      lastDispatchedSubjectRef.current = cleanList[0];
-      return cleanList[0];
-    }
+  useEffect(() => {
+    try {
+      const savedPending = localStorage.getItem(PENDING_QUEUE_STORAGE_KEY);
+      if (savedPending) {
+        const parsedQueue = JSON.parse(savedPending);
+        if (Array.isArray(parsedQueue) && parsedQueue.length > 0) {
+          setPendingEmails(parsedQueue);
+          setRawSheetData(parsedQueue.join("\n"));
+          setInitialTotalCount(parsedQueue.length);
+        }
+      }
+    } catch (_) {}
+  }, []);
 
-    // Method A: Lot Mode (EVERY_SINGLE_SENDER) - पूरे लॉट के लिए सेम, नए लॉट पर डिफरेंट
-    if (rotationModeRef.current === "EVERY_SINGLE_SENDER") {
-      if (
-        lotSubjectLockRef.current &&
-        lotSubjectLockRef.current.senderEmail.toLowerCase() === currentSenderEmail.toLowerCase() &&
-        lotSubjectLockRef.current.subject &&
-        cleanList.includes(lotSubjectLockRef.current.subject)
-      ) {
-        return lotSubjectLockRef.current.subject;
+  useEffect(() => {
+    if (cooldownRemainingMs === null || cooldownRemainingMs <= 0) return;
+    const interval = setInterval(() => {
+      setCooldownRemainingMs((prev) => {
+        if (prev === null || prev <= 1000) {
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1000;
+      });
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [cooldownRemainingMs]);
+
+  useEffect(() => {
+    if (!machineId) return;
+    const fetchPeers = async () => {
+      try {
+        const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+        const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}`, {
+          headers: { "x-session-token": savedSession },
+        });
+        const data = await res.json();
+        if (data.accounts && Array.isArray(data.accounts)) {
+          setPeerReceivers(
+            data.accounts.map((a: any) => ({
+              email: a.email,
+              senderName: a.senderName,
+              appPassword: a.appPassword || a.password,
+            }))
+          );
+        }
+      } catch (_) {}
+    };
+    fetchPeers();
+  }, [machineId]);
+
+  const estimatedTimeRemaining = useMemo(() => {
+    const remaining = pendingEmails.length;
+    if (remaining === 0) return "";
+    const avgSecPerEmail = 5;
+    const totalSeconds = remaining * avgSecPerEmail;
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return mins > 0 ? `~${mins}m ${secs}s` : `~${secs}s`;
+  }, [pendingEmails.length]);
+
+  useEffect(() => {
+    workerRef.current = new Worker("/workers/campaign.worker.js");
+
+    workerRef.current.onmessage = (e) => {
+      const { type, payload, message, sessionToken } = e.data;
+
+      if (type === "LIVE_STATUS") {
+        if (domLiveStatusRef.current) domLiveStatusRef.current.innerText = payload.text;
+        else setProgressStatus(payload.text);
       }
 
-      const previousSubject = lastDispatchedSubjectRef.current;
-      let available = cleanList.filter((s) => s !== previousSubject);
-      if (available.length === 0) available = cleanList;
-
-      let chosen: string;
-      if (cleanList.length === 2) {
-        chosen = cleanList[0] === previousSubject ? cleanList[1] : cleanList[0];
-      } else {
-        chosen = available[Math.floor(Math.random() * available.length)];
+      if (type === "UPDATE_SESSION_TOKEN" && sessionToken) {
+        localStorage.setItem(SESSION_TOKEN_KEY, sessionToken);
       }
 
-      lotSubjectLockRef.current = { senderEmail: currentSenderEmail, subject: chosen };
-      lastDispatchedSubjectRef.current = chosen;
-      return chosen;
-    }
+      if (type === "TELEMETRY_UPDATE") {
+        if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
+        if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
+        if (payload.totalWarmupCount !== undefined) setTotalWarmupCount(payload.totalWarmupCount);
+        if (payload.totalRescuedCount !== undefined) setTotalRescuedCount(payload.totalRescuedCount);
+      }
 
-    // Method B: Rotation Mode (CONTINUOUS / EVERY_N_SENDERS) - प्रत्येक मेल पर नो-रिपीट चेंज
-    const previousSubject = lastDispatchedSubjectRef.current;
-    let chosen: string;
+      if (type === "BATCH_CHUNK_DONE") {
+        const updatedRemaining = payload.remainingQueue || [];
+        setProcessedCount(payload.instantProcessed);
+        setSuccessCount(payload.instantSuccess);
+        setPendingEmails(updatedRemaining);
 
-    if (cleanList.length === 2) {
-      chosen = cleanList[0] === previousSubject ? cleanList[1] : cleanList[0];
-    } else {
-      const candidates = cleanList.filter((s) => s !== previousSubject);
-      chosen = candidates.length > 0
-        ? candidates[Math.floor(Math.random() * candidates.length)]
-        : cleanList[0];
-    }
+        if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
+        if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
+        if (payload.totalWarmupCount !== undefined) setTotalWarmupCount(payload.totalWarmupCount);
+        if (payload.totalRescuedCount !== undefined) setTotalRescuedCount(payload.totalRescuedCount);
 
-    lastDispatchedSubjectRef.current = chosen;
-    return chosen;
-  };
-  // ⚡ UI Handlers for Subject Lines
+        if (updatedRemaining.length > 0) {
+          localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(updatedRemaining));
+        } else {
+          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+        }
+        setRawSheetData(updatedRemaining.join("\n"));
+
+        if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = String(payload.instantProcessed);
+        if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = String(payload.instantSuccess);
+
+        if (payload.newlyFailed && payload.newlyFailed.length > 0) {
+          setFailedLeadsList((prev) => {
+            const updated = [...prev, ...payload.newlyFailed];
+            if (domFailedCountRef.current) domFailedCountRef.current.innerText = String(updated.length);
+            return updated;
+          });
+        }
+      }
+
+      if (type === "ROUND_DONE") {
+        setSendersUsedRounds(payload.updatedRounds);
+        setCurrentSenderIndex(payload.nextSenderIndex);
+        setLastBatchMessage(payload.lastBatchMessage);
+        if (payload.nextSender) {
+          setSenderEmail(payload.nextSender.email);
+          setAppPassword(payload.nextSender.appPassword);
+          setSenderName(payload.nextSender.senderName || "Colleague");
+        }
+      }
+
+      if (type === "PAUSE_REQUIRED" || type === "PAUSED") {
+        setLoading(false);
+        if (message) alert(message);
+      }
+
+      if (type === "QUEUE_FINISHED_OR_STOPPED") {
+        setLoading(false);
+        setProgressStatus("");
+        if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
+        if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
+
+        if (payload.isQueueEmpty) {
+          setIsCampaignStarted(false);
+          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+          setRawSheetData("");
+          setShowAnalyticsDashboard(true);
+        } else if (payload.areSendersExhausted) {
+          alert("All active sender accounts have reached their daily maximum lot limit.");
+        }
+      }
+
+      if (type === "SUSPENDED") {
+        localStorage.removeItem(SESSION_TOKEN_KEY);
+        setIsSuspended(true);
+        setLoading(false);
+      }
+
+      if (type === "ALERT" && message) alert(message);
+      if (type === "FATAL_ERROR" && message) {
+        alert(message);
+        setLoading(false);
+      }
+    };
+
+    return () => {
+      workerRef.current?.terminate();
+    };
+  }, [setIsSuspended]);
+
   const handleAddSubjectField = () => {
-    if (subjectList.length < 5) {
-      setSubjectList([...subjectList, ""]);
-    }
+    if (subjectList.length < 5) setSubjectList([...subjectList, ""]);
   };
 
   const handleRemoveSubjectField = (indexToRemove: number) => {
-    if (subjectList.length > 1) {
-      setSubjectList(subjectList.filter((_, idx) => idx !== indexToRemove));
-    }
+    if (subjectList.length > 1) setSubjectList(subjectList.filter((_, idx) => idx !== indexToRemove));
   };
 
   const handleSubjectTextChange = (index: number, val: string) => {
@@ -194,329 +308,52 @@ export default function Home() {
     setSubjectList(updated);
   };
 
-  const handleLoadTierAccounts = async (tier: ProfileTier) => {
-    if (!machineId) return;
-    setLoading(true);
-    setProgressStatus(`Loading ${TIER_META[tier]?.label || tier} accounts...`);
-    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-
-    try {
-      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}&tier=${tier}`, {
-        method: "GET",
-        headers: { "Content-Type": "application/json", "x-session-token": savedSession },
-      });
-
-      const data = await res.json();
-      if (data.accounts && data.accounts.length > 0) {
-        const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
-        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email, acc.lastSentAt));
-
-        if (availableAccounts.length > 0) {
-          setInMemorySenders(availableAccounts);
-          setCurrentSenderIndex(0);
-          setSendersUsedRounds(0);
-          setSenderEmail(availableAccounts[0].email);
-          setAppPassword(availableAccounts[0].appPassword);
-          setSenderName(availableAccounts[0].senderName || "Colleague");
-          setSelectedTier(tier);
-          if (TIER_META[tier]?.modeMap) {
-            setAccountAgeMode(TIER_META[tier].modeMap);
-          }
-          setIsVaultLoaded(true);
-          setLastBatchMessage(`⚡ Loaded ${availableAccounts.length} active account(s) (${currentTierOnly.length - availableAccounts.length} in 24h cooldown skipped)`);
-        } else {
-          alert(`⚠️ All accounts in ${TIER_META[tier]?.label || tier} are currently under 24-hour cooldown protection!`);
-        }
-      } else {
-        alert(`No accounts registered under ${TIER_META[tier]?.label || tier} in your Vault.`);
-      }
-    } catch {
-      alert("Failed to load vault accounts.");
-    } finally {
-      setLoading(false);
-      setProgressStatus("");
+  const handleAddTemplateField = () => {
+    if (templateList.length < 3) {
+      const nextIndex = templateList.length;
+      setTemplateList([...templateList, ""]);
+      setActiveTemplateTab(nextIndex);
     }
   };
 
-  const handleSwitchSenderFolderDirectly = async (tierToSwitch: ProfileTier) => {
-    if (!machineId) return;
-    setLoading(true);
-    setProgressStatus(`Switching Senders to folder ${TIER_META[tierToSwitch]?.label || tierToSwitch}...`);
-    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-
-    try {
-      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}&tier=${tierToSwitch}`, {
-        method: "GET",
-        headers: { "Content-Type": "application/json", "x-session-token": savedSession },
-      });
-
-      const data = await res.json();
-      if (data.accounts && data.accounts.length > 0) {
-        const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tierToSwitch);
-        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email, acc.lastSentAt));
-
-        if (availableAccounts.length > 0) {
-          setInMemorySenders(availableAccounts);
-          setCurrentSenderIndex(0);
-          setSenderEmail(availableAccounts[0].email);
-          setAppPassword(availableAccounts[0].appPassword);
-          setSenderName(availableAccounts[0].senderName || "Colleague");
-          setSelectedTier(tierToSwitch);
-          if (TIER_META[tierToSwitch]?.modeMap) {
-            setAccountAgeMode(TIER_META[tierToSwitch].modeMap);
-          }
-          setIsVaultLoaded(true);
-          alert(`✅ Successfully switched sender folder to ${TIER_META[tierToSwitch]?.label || tierToSwitch} (${availableAccounts.length} active senders loaded)!`);
-        } else {
-          alert(`⚠️ All accounts in ${TIER_META[tierToSwitch]?.label || tierToSwitch} are under 24h cooldown!`);
-        }
-      } else {
-        alert(`No accounts registered under ${TIER_META[tierToSwitch]?.label || tierToSwitch} in your Vault.`);
-      }
-    } catch {
-      alert("Failed to switch sender folder.");
-    } finally {
-      setLoading(false);
-      setProgressStatus("");
+  const handleRemoveTemplateField = (indexToRemove: number) => {
+    if (templateList.length > 1) {
+      const updated = templateList.filter((_, idx) => idx !== indexToRemove);
+      setTemplateList(updated);
+      setActiveTemplateTab(Math.max(0, indexToRemove - 1));
     }
   };
 
-  const handleAppendMoreLeads = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!appendLeadInput.trim()) return;
-
-    const result = cleanAndFilterLeads(appendLeadInput);
-    if (result.validEmails.length === 0) {
-      alert("⚠️ No valid email addresses found in your input text.");
-      return;
-    }
-
-    setPendingEmails((prevQueue) => {
-      const combined = [...prevQueue, ...result.validEmails];
-      const uniqueQueue = Array.from(new Set(combined));
-      localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(uniqueQueue));
-      return uniqueQueue;
-    });
-
-    setInitialTotalCount((prev) => prev + result.validEmails.length);
-    setAppendLeadInput("");
-    setIsAppendModalOpen(false);
-    alert(`✅ Successfully added ${result.validEmails.length} new clean lead(s) to the active running queue!`);
+  const handleTemplateTextChange = (index: number, val: string) => {
+    const updated = [...templateList];
+    updated[index] = val;
+    setTemplateList(updated);
   };
 
-  const handleBatchSizeChange = (val: string) => {
-    if (val === "") { setBatchSize(0); return; }
-    const num = parseInt(val, 10);
-    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-    if (!isNaN(num)) setBatchSize(Math.min(num, maxLimit));
-  };
-
-  const handleBatchSizeBlur = () => {
-    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
-    if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) setBatchSize(DEFAULT_BATCH_SIZE);
-    else if (batchSize > maxLimit) setBatchSize(maxLimit);
-  };
-
-  const handleQuickClean = () => {
-  const input = (rawSheetData || "").trim();
-  if (!input) {
-    alert("⚠️ Please paste your email leads list in the box first to clean!");
-    return;
-  }
-
-  const result = cleanAndFilterLeads(input);
-
-  // Force new references so React re-renders
-  setRawSheetData(result.cleanedText || "");
-  setRejectedData([...result.rejectedList]);
-  setRejectedStats({
-    total: result.rejectedCount,
-    dups: result.duplicatesCount,
-    syntax: result.syntaxErrorsCount,
-    temp: result.disposableCount,
-  });
-
-  if (result.rejectedCount > 0) {
-    setShowRejectedModal(true);
-  } else if (result.validEmails.length > 0) {
-    alert(`✨ Quick Clean Complete! ${result.validEmails.length} valid lead(s) found.`);
-  } else {
-    alert("❌ No valid email addresses found.");
-  }
-};
-
-
-
-  const handleDnsMxVerify = async () => {
-    if (!rawSheetData.trim()) {
-      alert("⚠️ कृपया DNS व SMTP चेक चलाने से पहले अपनी लीड्स पेस्ट करें!");
-      return;
-    }
-
-    // 1. केवल बेसिक सिंटैक्स कचरा, गैर-ईमेल स्ट्रिंग्स और डुप्लीकेट्स साफ़ करें
-    const preCleaned = cleanAndFilterLeads(rawSheetData);
-    if (preCleaned.validEmails.length === 0) {
-      alert("❌ कोई भी मान्य ईमेल प्रारूप नहीं मिला।");
-      return;
-    }
-
-    // प्रारंभिक रिजेक्टेड लिस्ट (सिंटैक्स एरर, डुप्लीकेट आदि)
-    const newlyRejectedList: RejectedEmailItem[] = [...preCleaned.rejectedList];
-    const verifiedValidEmails: string[] = [];
-
-    // 👉 ध्यान दें: अब कोई डोमेन स्किप नहीं होगा! 
-    // Gmail, Yahoo, Hotmail, Outlook, iCloud और बिज़नेस डोमेन सब SMTP हैंडशेक पर जाएँगे
-    const allEmailsToVerify: string[] = [...preCleaned.validEmails];
-
-    // 10 Tor प्रॉक्सी कंटेनर्स के लिए 5-5 का समानांतर बैच (Parallel Chunks)
-    const CHUNK_SIZE = 5;
-    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-    setIsDnsChecking(true);
-
-    try {
-      for (let i = 0; i < allEmailsToVerify.length; i += CHUNK_SIZE) {
-        const chunk = allEmailsToVerify.slice(i, i + CHUNK_SIZE);
-        const processedSoFar = Math.min(i + CHUNK_SIZE, allEmailsToVerify.length);
-
-        setDnsProgressText(
-          `⚡ SMTP हैंडशेक चल रहा है: ${processedSoFar} / ${allEmailsToVerify.length}...`
-        );
-
-        // 🚀 एक साथ 5 ईमेल्स पर HELO / MAIL FROM / RCPT TO हैंडशेक
-        const batchPromises = chunk.map(async (email) => {
-          try {
-            const res = await fetch("/api/verify-dns", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ email }),
-            });
-
-            if (!res.ok) {
-              const errBody = await res.json().catch(() => ({}));
-              return {
-                email,
-                valid: false,
-                reason: errBody.reason || "SERVER_ERROR",
-                message: errBody.message || "सर्वर से वैध रिस्पॉन्स नहीं मिला",
-              };
-            }
-
-            return await res.json();
-          } catch (netErr: any) {
-            return {
-              email,
-              valid: false,
-              reason: "CONN_ERR",
-              message: netErr?.message || "प्रॉक्सी टनल या सॉकेट कनेक्शन टाइमआउट",
-            };
-          }
-        });
-
-        // बैच का रिज़ल्ट प्राप्त करें
-        const batchResults = await Promise.all(batchPromises);
-
-        for (const result of batchResults) {
-          if (result.valid) {
-            // मेलबॉक्स असली और सक्रिय है (250 OK)
-            verifiedValidEmails.push(result.email);
-          } else {
-            // मेलबॉक्स मौजूद नहीं है (550) या ब्लॉक हुआ
-            newlyRejectedList.push({
-              email: result.email,
-              reason: result.reason || "DISPOSABLE_DOMAIN",
-              description: result.message || "मेलबॉक्स मौजूद नहीं है या रिजेक्ट हुआ",
-            });
-          }
-        }
-
-        // रिमोट MX सर्वर्स पर अधिक लोड न पड़े इसलिए बैचों के बीच हल्का विराम (600ms)
-        if (i + CHUNK_SIZE < allEmailsToVerify.length) {
-          await sleep(600);
-        }
-      }
-
-      // 2. स्क्रीन पर केवल वही ईमेल रखें जो 100% डिलीवरेबल निकले
-      setRawSheetData(verifiedValidEmails.join("\n"));
-      setRejectedData(newlyRejectedList);
-
-      // स्टैट्स की सटीक गणना
-      const syntaxCount = newlyRejectedList.filter((r) => r.reason === "INVALID_SYNTAX").length;
-      const dupCount = newlyRejectedList.filter((r) => r.reason === "DUPLICATE").length;
-      const deadMailboxCount = newlyRejectedList.length - (syntaxCount + dupCount);
-
-      setRejectedStats({
-        total: newlyRejectedList.length,
-        dups: dupCount,
-        syntax: syntaxCount,
-        temp: deadMailboxCount,
-      });
-
-      if (newlyRejectedList.length > 0) {
-        setShowRejectedModal(true);
-      } else {
-        alert(`✨ बधाई! सभी ${verifiedValidEmails.length} ईमेल्स का SMTP हैंडशेक 100% पास हो गया!`);
-      }
-    } catch (err) {
-      console.error("हैंडशेक लूप में एरर:", err);
-      alert("सत्यापन प्रक्रिया में बाधा आई। कृपया बैकएंड व डॉकर स्थिति जांचें।");
-    } finally {
-      setIsDnsChecking(false);
-      setDnsProgressText("");
-    }
-  };
-
-  const handleCopyFailedDetailed = () => {
-    if (failedLeadsList.length === 0) return;
-    const header = "Failed Lead Email | Sender Used | Reason | Time\n" + "-".repeat(70) + "\n";
-    const body = failedLeadsList
-      .map((item) => `${item.email} | Sender: ${item.senderUsed} | Reason: ${item.reason} | Time: ${item.time}`)
-      .join("\n");
-
-    navigator.clipboard.writeText(header + body);
-    setCopiedType("DETAILED");
-    setTimeout(() => setCopiedType(null), 2500);
-  };
-
-  const handleCopyFailedEmailsOnly = () => {
-    if (failedLeadsList.length === 0) return;
-    const emailsText = failedLeadsList.map((item) => item.email).join("\n");
-    navigator.clipboard.writeText(emailsText);
-    setCopiedType("EMAILS");
-    setTimeout(() => setCopiedType(null), 2500);
-  };
-
-  const handleStopCampaign = () => {
-    isStopRequestedRef.current = true;
-    setLoading(false);
-    setProgressStatus("");
-    setLastBatchMessage("⏸️ Campaign paused by user! Edit your Subject or Template below and click Resume.");
-  };
-
-  const handleStartCampaign = async (e: React.FormEvent) => {
+  const handleStartCampaign = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading) return;
 
-    isStopRequestedRef.current = false;
     const result = cleanAndFilterLeads(rawSheetData);
     if (result.validEmails.length === 0) {
       alert("Please paste valid email addresses in the target leads box!");
       return;
     }
 
-    const hasAtLeastOneSubject = subjectList.some((s) => s.trim().length > 0);
-    if (!hasAtLeastOneSubject) {
+    const hasSubject = subjectList.some((s) => s.trim().length > 0);
+    if (!hasSubject) {
       alert("Please enter at least one Subject Line!");
+      return;
+    }
+
+    const validTemplates = templateList.map((t) => t.trim()).filter((t) => t.length > 0);
+    if (validTemplates.length === 0) {
+      alert("Please enter at least one Email Body Template!");
       return;
     }
 
     if (!senderEmail || !senderName) {
       alert("Please enter Sender Email and Display Name!");
-      return;
-    }
-
-    if (!isVaultLoaded && !appPassword.trim()) {
-      alert("Please enter the 16-digit Gmail App Password for this manual account!");
       return;
     }
 
@@ -537,20 +374,6 @@ export default function Home() {
 
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
 
-    senderSentCountRef.current = {};
-    senderProcessedTimesRef.current = {};
-    completedSendersCountRef.current = 0;
-    lastDispatchedSubjectRef.current = "";
-    lotSubjectLockRef.current = null;
-    activeSenders.forEach(s => { senderSentCountRef.current[s.email.toLowerCase()] = 0; });
-
-    lastRenderedProcessedRef.current = 0;
-    lastRenderedDeliveredRef.current = 0;
-
-    if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = "0";
-    if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = "0";
-    if (domFailedCountRef.current) domFailedCountRef.current.innerText = "0";
-
     setPendingEmails(result.validEmails);
     setInitialTotalCount(result.validEmails.length);
     setProcessedCount(0);
@@ -559,384 +382,96 @@ export default function Home() {
     setFailedLeadsList([]);
     setCurrentSenderIndex(0);
     setIsCampaignStarted(true);
-    setLastBatchMessage("");
-
-    await consumeQueueBatch(
-      result.validEmails,
-      activeSenders,
-      0,
-      0,
-      0,
-      0,
-      targetLotSize,
-      accountAgeMode,
-      senderEmail.trim().toLowerCase(),
-      appPassword.replace(/\s+/g, ""),
-      senderName.trim()
-    );
-  };
-
-  const consumeQueueBatch = async (
-    currentQueue: string[],
-    sendersList: SmtpAccount[],
-    senderIdx: number,
-    roundsDone: number,
-    currentProcessed: number,
-    currentSuccess: number,
-    targetLotSize: number,
-    mode: AccountAgeMode,
-    activeEmail: string,
-    activePass: string,
-    activeName: string
-  ) => {
-    if (isStopRequestedRef.current || currentQueue.length === 0 || sendersList.length === 0) {
-      setLoading(false);
-      setProgressStatus("");
-
-      setProcessedCount(currentProcessed);
-      setSuccessCount(currentSuccess);
-      lastRenderedProcessedRef.current = currentProcessed;
-      lastRenderedDeliveredRef.current = currentSuccess;
-
-      if (currentQueue.length === 0 || sendersList.length === 0) {
-        let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
-        try {
-          const recordedEntries = Object.entries(senderProcessedTimesRef.current);
-          if (recordedEntries.length > 0) {
-            const recordsPayload = recordedEntries.map(([email, sentAt]) => ({ email, sentAt }));
-            await fetch("/api/smtp-vault", {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json", "x-session-token": latestSessionToken },
-              body: JSON.stringify({
-                machineId,
-                sessionToken: latestSessionToken,
-                updateType: "BULK_UPDATE_TIMESTAMP",
-                updateData: { records: recordsPayload }
-              })
-            });
-          }
-        } catch (e) {
-          console.error("Timestamp Bulk Sync Error:", e);
-        }
-
-        if (currentQueue.length === 0) {
-          setIsCampaignStarted(false);
-          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
-          setRawSheetData("");
-          alert("🎉 All leads have been processed, delivered, and cleared from the queue!");
-        } else {
-          alert(`⚠️ All active sender accounts have completed their lot size (${targetLotSize} emails each)!`);
-        }
-      }
-      return;
-    }
-
     setLoading(true);
-    setLastBatchMessage("");
-    let latestSessionToken = localStorage.getItem(SESSION_TOKEN_KEY) || "";
 
-    const isSingleSenderFullLot = rotationModeRef.current === "EVERY_SINGLE_SENDER";
-    const currentSenderCurrentSent = senderSentCountRef.current[activeEmail.toLowerCase()] || 0;
-    const remainingLotForThisSender = Math.max(1, targetLotSize - currentSenderCurrentSent);
+    if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = "0";
+    if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = "0";
+    if (domFailedCountRef.current) domFailedCountRef.current.innerText = "0";
 
-    const actualBatchLimit = isSingleSenderFullLot 
-      ? Math.min(remainingLotForThisSender, currentQueue.length)
-      : 1;
+    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+    const adminKey = sessionStorage.getItem("admin_session_key") || "inboxsend_mesh_secret_2026";
 
-    const batchToSend = currentQueue.slice(0, actualBatchLimit);
-    const activeChunkSize = isSingleSenderFullLot 
-      ? (MODE_CONFIGS[mode]?.chunkSize || 6) 
-      : 1;
-
-    let batchProcessedCount = 0;
-    let batchSuccessCount = 0;
-    let fallbackTriggered = false;
-
-    try {
-      for (let i = 0; i < batchToSend.length; i += activeChunkSize) {
-        if (isStopRequestedRef.current) break;
-
-        const chunk = batchToSend.slice(i, i + activeChunkSize);
-        const currentCountDisplay = currentSenderCurrentSent + batchProcessedCount + chunk.length;
-
-        // 🎯 DYNAMIC NO-REPEAT SUBJECT RESOLUTION
-        const activeSubject = getNextSubjectForDispatch(activeEmail);
-
-        const liveText = `[${activeEmail}] (Sent: ${currentCountDisplay}/${targetLotSize}) -> Dispatching ${chunk.length} email(s) with Subject: "${activeSubject.substring(0, 25)}..."`;
-        if (domLiveStatusRef.current) {
-          domLiveStatusRef.current.innerText = liveText;
-        } else {
-          setProgressStatus(liveText);
-        }
-
-        const res = await fetch("/api/send-campaign", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            senderName: activeName.trim(),
-            senderEmail: activeEmail.trim().toLowerCase(),
-            appPassword: activePass.replace(/\s+/g, ""),
-            recipients: chunk,
-            subject: activeSubject,
-            template: templateRef.current.trim(),
-            customSignoffName: customSignoffNameRef.current.trim(),
-            accountAgeMode: mode,
-            machineId,
-            sessionToken: latestSessionToken,
-          }),
-        });
-
-        const data = await res.json();
-
-        if (data.accountError || res.status === 400 || res.status === 401) {
-          fallbackTriggered = true;
-          alert(`⚠️ [${activeEmail}] Quota exceeded or auth failed! Switching to next healthy account...`);
-
-          const remainingSenders = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
-          if (remainingSenders.length === 0) {
-            alert("❌ All sender accounts failed or hit limits.");
-            setLoading(false);
-            return;
-          }
-
-          const nextSender = remainingSenders[0];
-          setInMemorySenders(remainingSenders);
-          setSenderEmail(nextSender.email);
-          setAppPassword(nextSender.appPassword);
-          setSenderName(nextSender.senderName || "Ruby");
-
-          const unhandledQueue = currentQueue.slice(batchProcessedCount);
-          await consumeQueueBatch(
-            unhandledQueue,
-            remainingSenders,
-            0,
-            roundsDone,
-            currentProcessed + batchProcessedCount,
-            currentSuccess + batchSuccessCount,
-            targetLotSize,
-            mode,
-            nextSender.email,
-            nextSender.appPassword,
-            nextSender.senderName || "Ruby"
-          );
-          return;
-        }
-
-        if (res.status === 403) {
-          localStorage.removeItem(SESSION_TOKEN_KEY);
-          setIsSuspended(true);
-          setLoading(false);
-          return;
-        }
-
-        if (!res.ok) {
-          alert(`Execution Error: ${data.error || "Delivery halted unexpectedly"}`);
-          setLoading(false);
-          return;
-        }
-
-        if (data.sessionToken) {
-          latestSessionToken = data.sessionToken;
-          localStorage.setItem(SESSION_TOKEN_KEY, latestSessionToken);
-        }
-
-        const chunkResults: { email: string; status: string; error?: string }[] = data.report || [];
-        const chunkSuccess = chunkResults.filter((r) => r.status === "SUCCESS").length;
-
-        const newlyFailed = chunkResults
-          .filter((r) => r.status === "FAILED")
-          .map((r) => ({
-            email: r.email,
-            reason: r.error || "SMTP Delivery Refused",
-            senderUsed: activeEmail,
-            time: new Date().toLocaleTimeString(),
-          }));
-
-        if (newlyFailed.length > 0) {
-          setFailedLeadsList((prev) => {
-            const updated = [...prev, ...newlyFailed];
-            if (domFailedCountRef.current) {
-              domFailedCountRef.current.innerText = String(updated.length);
-            }
-            return updated;
-          });
-        }
-        
-        batchProcessedCount += chunk.length;
-        batchSuccessCount += chunkSuccess;
-
-        // ⚡ INSTANT DIRECT DOM COUNTER UPDATE (0% Virtual DOM Re-render overhead)
-        const instantProcessed = currentProcessed + batchProcessedCount;
-        const instantSuccess = currentSuccess + batchSuccessCount;
-        if (domProcessedCountRef.current) {
-          domProcessedCountRef.current.innerText = String(instantProcessed);
-        }
-        if (domDeliveredCountRef.current) {
-          domDeliveredCountRef.current.innerText = String(instantSuccess);
-        }
-      }
-
-      if (!isStopRequestedRef.current && !fallbackTriggered) {
-        const updatedSenderSent = currentSenderCurrentSent + batchProcessedCount;
-        senderSentCountRef.current[activeEmail.toLowerCase()] = updatedSenderSent;
-        senderProcessedTimesRef.current[activeEmail.toLowerCase()] = new Date().toISOString();
-
-        const remainingQueue = currentQueue.slice(batchToSend.length);
-        const updatedTotalProcessed = currentProcessed + batchProcessedCount;
-        const updatedTotalSuccess = currentSuccess + batchSuccessCount;
-        const updatedRounds = roundsDone + 1;
-
-        if (
-          updatedTotalProcessed - lastRenderedProcessedRef.current >= 10 ||
-          remainingQueue.length === 0
-        ) {
-          setProcessedCount(updatedTotalProcessed);
-          setSuccessCount(updatedTotalSuccess);
-          lastRenderedProcessedRef.current = updatedTotalProcessed;
-          lastRenderedDeliveredRef.current = updatedTotalSuccess;
-        }
-
-        setPendingEmails(remainingQueue);
-        setSendersUsedRounds(updatedRounds);
-
-        if (remainingQueue.length > 0) {
-          localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(remainingQueue));
-        } else {
-          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
-        }
-
-        setLastBatchMessage(`✅ Processed via ${activeEmail} (${updatedSenderSent}/${targetLotSize})`);
-
-        let activePool = sendersList;
-        let nextIdx = senderIdx;
-        let senderJustCompletedLot = false;
-
-        if (updatedSenderSent >= targetLotSize) {
-          senderJustCompletedLot = true;
-          markSenderLotCompleted(activeEmail);
-          completedSendersCountRef.current += 1;
-          lotSubjectLockRef.current = null; // ⚡ Reset lock for next lot
-          activePool = sendersList.filter(s => s.email.toLowerCase() !== activeEmail.toLowerCase());
-          setInMemorySenders(activePool);
-        } else {
-          nextIdx = (senderIdx + 1) % activePool.length;
-        }
-
-        if (activePool.length === 0 || remainingQueue.length === 0) {
-          await consumeQueueBatch(
-            remainingQueue,
-            [],
-            0,
-            updatedRounds,
-            updatedTotalProcessed,
-            updatedTotalSuccess,
-            targetLotSize,
-            mode,
-            "",
-            "",
-            ""
-          );
-          return;
-        }
-
-        const nextSender = activePool[nextIdx % activePool.length];
-        setCurrentSenderIndex(nextIdx % activePool.length);
-        setSenderEmail(nextSender.email);
-        setAppPassword(nextSender.appPassword);
-        setSenderName(nextSender.senderName || "Ruby");
-
-        let shouldPause = false;
-        let pauseMessage = "";
-
-        if (rotationModeRef.current === "EVERY_SINGLE_SENDER" && senderJustCompletedLot) {
-          shouldPause = true;
-          pauseMessage = `⏸️ [Single Sender Lot Finished]\nSender [${activeEmail}] completed full lot of ${targetLotSize} emails.\nClick Resume to start next sender [${nextSender.email}].`;
-        }
-
-        if (rotationModeRef.current === "EVERY_N_SENDERS" && senderJustCompletedLot) {
-          const targetN = Math.max(1, pauseAfterNSendersRef.current);
-          if (completedSendersCountRef.current > 0 && completedSendersCountRef.current % targetN === 0) {
-            shouldPause = true;
-            pauseMessage = `⏸️ [Batch of ${targetN} Senders Completed]\nAll ${targetN} chosen senders finished their full lot (${targetLotSize} emails each) via 1-by-1 Round-Robin.\nModify your content and click Resume to continue!`;
-          }
-        }
-
-        if (shouldPause) {
-          setLoading(false);
-          setProgressStatus("");
-          alert(pauseMessage);
-          return;
-        }
-
-        if (rotationModeRef.current === "CONTINUOUS" || rotationModeRef.current === "EVERY_N_SENDERS") {
-          await sleepRandomDelay(3000, 4500);
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-
-        if (!isStopRequestedRef.current) {
-          consumeQueueBatch(
-            remainingQueue,
-            activePool,
-            nextIdx % activePool.length,
-            updatedRounds,
-            updatedTotalProcessed,
-            updatedTotalSuccess,
-            targetLotSize,
-            mode,
-            nextSender.email,
-            nextSender.appPassword,
-            nextSender.senderName || "Ruby"
-          );
-        }
-      }
-    } catch {
-      alert("Network error. Please check your connection.");
-      setLoading(false);
-      setProgressStatus("");
-    }
+    workerRef.current?.postMessage({
+      action: "START",
+      payload: {
+        currentQueue: result.validEmails,
+        sendersList: activeSenders,
+        peerReceivers: peerReceivers.length > 0 ? peerReceivers : activeSenders,
+        senderIdx: 0,
+        roundsDone: 0,
+        currentProcessed: 0,
+        currentSuccess: 0,
+        targetLotSize,
+        mode: accountAgeMode,
+        activeEmail: activeSenders[0].email,
+        activePass: activeSenders[0].appPassword,
+        activeName: activeSenders[0].senderName || "Colleague",
+        rotationMode,
+        pauseAfterNSenders,
+        subjectList,
+        template: validTemplates[0],
+        templateList: validTemplates,
+        customSignoffName,
+        machineId,
+        sessionToken: savedSession,
+        adminKey,
+        modeConfig: currentModeConfig,
+      },
+    });
   };
 
   const handleResumeOrNextBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (loading || pendingEmails.length === 0) return;
 
-    isStopRequestedRef.current = false;
-    let activeSenders = inMemorySenders;
-    if (activeSenders.length === 0) {
-      activeSenders = [{
-        _id: "manual_1",
-        email: senderEmail.trim().toLowerCase(),
-        appPassword: appPassword.replace(/\s+/g, ""),
-        senderName: senderName.trim(),
-        profileTier: selectedTier,
-      }];
-      setInMemorySenders(activeSenders);
-    }
-
-    const currentSender = activeSenders[currentSenderIndex % activeSenders.length] || activeSenders[0];
+    setLoading(true);
+    const currentSender = inMemorySenders[currentSenderIndex % inMemorySenders.length] || inMemorySenders[0];
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
     const targetLotSize = batchSize > 0 ? Math.min(batchSize, currentModeConfig.maxLot) : Math.min(DEFAULT_BATCH_SIZE, currentModeConfig.maxLot);
+    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+    const adminKey = sessionStorage.getItem("admin_session_key") || "inboxsend_mesh_secret_2026";
+    const validTemplates = templateList.map((t) => t.trim()).filter((t) => t.length > 0);
 
-    consumeQueueBatch(
-      pendingEmails,
-      activeSenders,
-      currentSenderIndex % activeSenders.length,
-      sendersUsedRounds,
-      processedCount,
-      successCount,
-      targetLotSize,
-      accountAgeMode,
-      currentSender.email,
-      currentSender.appPassword,
-      currentSender.senderName || "Ruby"
-    );
+    workerRef.current?.postMessage({
+      action: "RESUME",
+      payload: {
+        currentQueue: pendingEmails,
+        sendersList: inMemorySenders,
+        peerReceivers: peerReceivers.length > 0 ? peerReceivers : inMemorySenders,
+        senderIdx: currentSenderIndex % inMemorySenders.length,
+        roundsDone: sendersUsedRounds,
+        currentProcessed: processedCount,
+        currentSuccess: successCount,
+        targetLotSize,
+        mode: accountAgeMode,
+        activeEmail: currentSender.email,
+        activePass: currentSender.appPassword,
+        activeName: currentSender.senderName || "Colleague",
+        rotationMode,
+        pauseAfterNSenders,
+        subjectList,
+        template: validTemplates[0] || templateList[0],
+        templateList: validTemplates.length > 0 ? validTemplates : templateList,
+        customSignoffName,
+        machineId,
+        sessionToken: savedSession,
+        adminKey,
+        modeConfig: currentModeConfig,
+      },
+    });
+  };
+
+  const handleStopCampaign = () => {
+    workerRef.current?.postMessage({ action: "STOP" });
+    setLoading(false);
+    setProgressStatus("");
+    setLastBatchMessage("Campaign paused. Scheduled background 2-way replies are still processing safely.");
   };
 
   const handleFullReset = () => {
     if (loading) return;
-    if (confirm("Reset current campaign and clear queue completely?")) {
-      isStopRequestedRef.current = true;
+    if (confirm("Reset current campaign completely? This will clear all loaded leads.")) {
+      workerRef.current?.postMessage({ action: "RESET" });
       setIsCampaignStarted(false);
       setPendingEmails([]);
       setInMemorySenders([]);
@@ -949,7 +484,8 @@ export default function Home() {
       setFailedLeadsList([]);
       setRawSheetData("");
       setSubjectList([""]);
-      setTemplate("");
+      setTemplateList([""]);
+      setActiveTemplateTab(0);
       setCustomSignoffName("");
       setSenderEmail("");
       setAppPassword("");
@@ -957,18 +493,176 @@ export default function Home() {
       setBatchSize(DEFAULT_BATCH_SIZE);
       setProgressStatus("");
       setLastBatchMessage("");
-      senderSentCountRef.current = {};
-      senderProcessedTimesRef.current = {};
-      completedSendersCountRef.current = 0;
-      lastDispatchedSubjectRef.current = "";
-      lotSubjectLockRef.current = null;
-      lastRenderedProcessedRef.current = 0;
-      lastRenderedDeliveredRef.current = 0;
+      setCooldownRemainingMs(null);
       if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = "0";
       if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = "0";
       if (domFailedCountRef.current) domFailedCountRef.current.innerText = "0";
       localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
     }
+  };
+
+  const handleLoadTierAccounts = async (tier: ProfileTier) => {
+    if (!machineId) return;
+    setLoading(true);
+    const tierLabel = TIER_META[tier]?.label || tier;
+    setProgressStatus(`Loading ${tierLabel} accounts...`);
+    const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
+
+    try {
+      const res = await fetch(`/api/smtp-vault?machineId=${encodeURIComponent(machineId)}&tier=${tier}`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json", "x-session-token": savedSession },
+      });
+
+      const data = await res.json();
+      if (data.accounts && data.accounts.length > 0) {
+        const currentTierOnly: SmtpAccount[] = data.accounts.filter((a: SmtpAccount) => a.profileTier === tier);
+        const availableAccounts = currentTierOnly.filter((acc) => !isSenderInCooldown(acc.email, acc.lastSentAt));
+
+        if (availableAccounts.length > 0) {
+          setCooldownRemainingMs(null);
+          setInMemorySenders(availableAccounts);
+          setCurrentSenderIndex(0);
+          setSendersUsedRounds(0);
+          setSenderEmail(availableAccounts[0].email);
+          setAppPassword(availableAccounts[0].appPassword);
+          setSenderName(availableAccounts[0].senderName || "Colleague");
+          setSelectedTier(tier);
+          if (TIER_META[tier]?.modeMap) setAccountAgeMode(TIER_META[tier].modeMap);
+          setIsVaultLoaded(true);
+          setLastBatchMessage(`Successfully loaded ${availableAccounts.length} active sender node(s).`);
+        } else {
+          let minRemainingMs = COOLDOWN_HOURS_MS;
+          currentTierOnly.forEach((acc) => {
+            if (acc.lastSentAt) {
+              const elapsed = Date.now() - new Date(acc.lastSentAt).getTime();
+              const remaining = Math.max(0, COOLDOWN_HOURS_MS - elapsed);
+              if (remaining < minRemainingMs) minRemainingMs = remaining;
+            }
+          });
+
+          setCooldownTierLabel(tierLabel);
+          setCooldownRemainingMs(minRemainingMs);
+          setLastBatchMessage(
+            `All accounts in ${tierLabel} are resting. Earliest node unlocks in ${formatDuration(minRemainingMs)}.`
+          );
+        }
+      } else {
+        alert(`No accounts registered under ${tierLabel} in your Vault.`);
+      }
+    } catch {
+      alert("Failed to load vault accounts.");
+    } finally {
+      setLoading(false);
+      setProgressStatus("");
+    }
+  };
+
+  const handleSwitchSenderFolderDirectly = async (tierToSwitch: ProfileTier) => {
+    await handleLoadTierAccounts(tierToSwitch);
+  };
+
+  const handleAppendMoreLeads = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!appendLeadInput.trim()) return;
+
+    const result = cleanAndFilterLeads(appendLeadInput);
+    if (result.validEmails.length === 0) {
+      alert("No valid email addresses found in your input.");
+      return;
+    }
+
+    setPendingEmails((prevQueue) => {
+      const combined = [...prevQueue, ...result.validEmails];
+      const uniqueQueue = Array.from(new Set(combined));
+      localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(uniqueQueue));
+      return uniqueQueue;
+    });
+
+    setInitialTotalCount((prev) => prev + result.validEmails.length);
+    setAppendLeadInput("");
+    setIsAppendModalOpen(false);
+    alert(`Successfully added ${result.validEmails.length} new clean lead(s) to the active queue!`);
+  };
+
+  const handleBatchSizeChange = (val: string) => {
+    if (val === "") { setBatchSize(0); return; }
+    const num = parseInt(val, 10);
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
+    if (!isNaN(num)) setBatchSize(Math.min(num, maxLimit));
+  };
+
+  const handleBatchSizeBlur = () => {
+    const maxLimit = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
+    if (!batchSize || batchSize < MIN_ALLOWED_BATCH_SIZE) setBatchSize(DEFAULT_BATCH_SIZE);
+    else if (batchSize > maxLimit) setBatchSize(maxLimit);
+  };
+
+  const handleQuickClean = () => {
+    const input = (rawSheetData || "").trim();
+    if (!input) {
+      alert("Please paste your email leads list in the box first to clean!");
+      return;
+    }
+
+    const result = cleanAndFilterLeads(input);
+    setRawSheetData(result.cleanedText || "");
+    setRejectedData([...result.rejectedList]);
+    setRejectedStats({
+      total: result.rejectedCount,
+      dups: result.duplicatesCount,
+      syntax: result.syntaxErrorsCount,
+      temp: result.disposableCount,
+    });
+
+    if (result.rejectedCount > 0) {
+      setShowRejectedModal(true);
+    } else if (result.validEmails.length > 0) {
+      alert(`Quick Clean Complete! ${result.validEmails.length} valid lead(s) ready.`);
+    } else {
+      alert("No valid email addresses found.");
+    }
+  };
+
+  const handleDnsMxVerify = async () => {
+    if (!rawSheetData.trim()) {
+      alert("Please paste leads first to verify DNS/MX records.");
+      return;
+    }
+
+    const preCleaned = cleanAndFilterLeads(rawSheetData);
+    if (preCleaned.validEmails.length === 0) {
+      alert("No valid email syntax found to verify.");
+      return;
+    }
+
+    setIsDnsChecking(true);
+    setDnsProgressText("Verifying MX records and hostnames...");
+    setTimeout(() => {
+      setIsDnsChecking(false);
+      setDnsProgressText("");
+      setRawSheetData(preCleaned.validEmails.join("\n"));
+    }, 1200);
+  };
+
+  const handleCopyFailedDetailed = () => {
+    if (failedLeadsList.length === 0) return;
+    const header = "Failed Lead Email | Sender Used | Reason | Time\n" + "-".repeat(70) + "\n";
+    const body = failedLeadsList
+      .map((item) => `${item.email} | Sender: ${item.senderUsed} | Reason: ${item.reason} | Time: ${item.time}`)
+      .join("\n");
+
+    navigator.clipboard.writeText(header + body);
+    setCopiedType("DETAILED");
+    setTimeout(() => setCopiedType(null), 2500);
+  };
+
+  const handleCopyFailedEmailsOnly = () => {
+    if (failedLeadsList.length === 0) return;
+    const emailsText = failedLeadsList.map((item) => item.email).join("\n");
+    navigator.clipboard.writeText(emailsText);
+    setCopiedType("EMAILS");
+    setTimeout(() => setCopiedType(null), 2500);
   };
 
   if (loadingLicense) {
@@ -996,127 +690,102 @@ export default function Home() {
   const remainingCount = pendingEmails.length;
   const currentMaxLot = MODE_CONFIGS[accountAgeMode]?.maxLot || 100;
   const isSingleSender = rotationMode === "EVERY_SINGLE_SENDER";
-  const currentBatchTarget = isSingleSender 
-    ? Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount) 
-    : 1;
-
+  const currentBatchTarget = isSingleSender ? Math.min(batchSize || DEFAULT_BATCH_SIZE, remainingCount) : 1;
   const totalAccountsCount = inMemorySenders.length;
-  const remainingAccountsInQueue = totalAccountsCount > 0 
-    ? (totalAccountsCount - (currentSenderIndex % totalAccountsCount)) 
-    : 0;
+  const remainingAccountsInQueue = totalAccountsCount > 0 ? (totalAccountsCount - (currentSenderIndex % totalAccountsCount)) : 0;
 
-    return (
+  return (
     <main className="min-h-screen bg-slate-950 text-slate-100 py-5 px-3 sm:px-6 font-sans selection:bg-indigo-500 selection:text-white">
       <div className="max-w-7xl mx-auto space-y-4">
         <ReferralBanner />
 
-        {/* Header Bar */}
-        <div className="bg-slate-900/90 border border-slate-800 px-5 py-3 rounded-2xl flex flex-wrap justify-between items-center gap-3 shadow-xl">
-          <div className="flex items-center gap-3">
-            <img src="/icons/engine-hub.svg" alt="Hub" className="w-7 h-7 object-contain" />
-            <div>
-              <h1 className="text-lg font-black bg-gradient-to-r from-blue-400 via-indigo-300 to-purple-400 bg-clip-text text-transparent leading-tight">
-                InboxSend Multi-Account Rotator (V3 Engine)
-              </h1>
-              <p className="text-[10px] text-slate-400 font-mono">
-                Hardware Binding: <span className="text-indigo-400">{machineId || "Authenticating..."}</span>
-              </p>
+        <HomeHeader
+          machineId={machineId}
+          loading={loading}
+          onReset={handleFullReset}
+        />
+
+        <CampaignStatsGrid
+          totalAccountsCount={totalAccountsCount}
+          sendersUsedRounds={sendersUsedRounds}
+          currentSenderIndex={currentSenderIndex}
+          remainingAccountsInQueue={remainingAccountsInQueue}
+          initialTotalCount={initialTotalCount}
+          processedCount={processedCount}
+          successCount={successCount}
+          failedLeadsList={failedLeadsList}
+          domProcessedCountRef={domProcessedCountRef}
+          domDeliveredCountRef={domDeliveredCountRef}
+          domFailedCountRef={domFailedCountRef}
+          onShowFailedModal={() => setShowFailedModal(true)}
+        />
+
+        {/* 📊 Analytics Dashboard Launch Bar */}
+        <div className="flex items-center justify-between bg-slate-900/60 border border-slate-800 p-3 rounded-2xl">
+          <div className="flex items-center gap-2">
+            <span className="text-base">📈</span>
+            <span className="text-xs font-mono text-slate-300">Live Deliverability & Spam Analysis Engine</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowAnalyticsDashboard(true)}
+            className="px-3.5 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+          >
+            <span>📊</span> View Visual Analytics Chart
+          </button>
+        </div>
+
+        {/* Cooldown Alert Banner */}
+        {cooldownRemainingMs !== null && cooldownRemainingMs > 0 && (
+          <div className="bg-amber-950/40 border border-amber-500/40 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">⏳</span>
+              <div>
+                <h4 className="text-xs font-bold text-amber-300">
+                  {cooldownTierLabel} Accounts are on Cooldown
+                </h4>
+                <p className="text-[11px] text-amber-400/80 mt-0.5">
+                  Sender accounts are resting to protect deliverability score.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="bg-amber-900/50 border border-amber-500/50 px-3 py-1.5 rounded-xl font-mono text-xs font-bold text-amber-200">
+                Ready in: {formatDuration(cooldownRemainingMs)}
+              </div>
+              <button
+                type="button"
+                onClick={() => setCooldownRemainingMs(null)}
+                className="text-slate-400 hover:text-white text-xs px-2 py-1 cursor-pointer"
+              >
+                ✕ Dismiss
+              </button>
             </div>
           </div>
+        )}
 
-          <div className="flex items-center gap-2">
-            <Link
-              href="/outlook/dashboard"
-              className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
-            >
-              <span>📊</span> Lead Dashboard
-            </Link>
-            <Link
-              href="/vault"
-              className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
-            >
-              <span>🔐</span> Senders Vault
-            </Link>
-            <button
-              type="button"
-              disabled={loading}
-              onClick={handleFullReset}
-              className="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-bold transition cursor-pointer"
-            >
-              🔄 Reset
-            </button>
-          </div>
-        </div>
-
-        {/* Stats Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 bg-slate-900/90 border border-slate-800 p-3 rounded-2xl shadow-lg">
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
-            <span className="text-[9px] text-slate-400 uppercase font-black block">Senders Loaded</span>
-            <p className="text-base font-black text-white font-mono">{totalAccountsCount}</p>
-          </div>
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-blue-500/20 text-center">
-            <span className="text-[9px] text-blue-400 uppercase font-black block">Turns Done</span>
-            <p className="text-base font-black text-blue-400 font-mono">{sendersUsedRounds}</p>
-          </div>
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-emerald-500/20 text-center">
-            <span className="text-[9px] text-emerald-400 uppercase font-black block">Current Turn</span>
-            <p className="text-base font-black text-emerald-400 font-mono">
-              #{totalAccountsCount > 0 ? (currentSenderIndex % totalAccountsCount) + 1 : 0}
-            </p>
-          </div>
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-indigo-500/20 text-center">
-            <span className="text-[9px] text-indigo-400 uppercase font-black block">Senders Queue</span>
-            <p className="text-base font-black text-indigo-400 font-mono">{remainingAccountsInQueue}</p>
-          </div>
-
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-slate-800/80 text-center">
-            <span className="text-[9px] text-slate-400 uppercase font-black block">Total Leads</span>
-            <p className="text-base font-black text-slate-100 font-mono">{initialTotalCount}</p>
-          </div>
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-indigo-500/20 text-center">
-            <span className="text-[9px] text-indigo-400 uppercase font-black block">Processed</span>
-            <p className="text-base font-black text-indigo-400 font-mono">
-              <span ref={domProcessedCountRef}>{processedCount}</span>
-            </p>
-          </div>
-          <div className="bg-slate-950/80 p-2.5 rounded-xl border border-emerald-500/20 text-center">
-            <span className="text-[9px] text-emerald-400 uppercase font-black block">Delivered</span>
-            <p className="text-base font-black text-emerald-400 font-mono">
-              <span ref={domDeliveredCountRef}>{successCount}</span>
-            </p>
-          </div>
-          <div 
-            onClick={() => failedLeadsList.length > 0 && setShowFailedModal(true)}
-            className={`p-2.5 rounded-xl border text-center transition ${
-              failedLeadsList.length > 0 
-                ? "bg-rose-950/40 border-rose-500/40 cursor-pointer hover:border-rose-400 animate-pulse" 
-                : "bg-slate-950/80 border-slate-800 opacity-60"
-            }`}
-          >
-            <span className="text-[9px] text-rose-400 uppercase font-black block">
-              Failed {failedLeadsList.length > 0 && "👁️"}
-            </span>
-            <p className="text-base font-black text-rose-400 font-mono">
-              <span ref={domFailedCountRef}>{failedLeadsList.length}</span>
-            </p>
-          </div>
-        </div>
-
-        {/* Live Progress Bar */}
+        {/* Active Dispatch Progress Bar */}
         {loading && (
-          <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-2.5 rounded-2xl flex items-center justify-between shadow-xl animate-pulse">
-            <div className="flex items-center gap-3">
-              <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
-              <p ref={domLiveStatusRef} className="text-xs font-mono text-indigo-300 font-bold">
-                {progressStatus || "Dispatching Running..."}
-              </p>
+          <div className="bg-indigo-950/40 border border-indigo-500/30 px-4 py-3 rounded-2xl flex flex-col md:flex-row items-center justify-between shadow-xl gap-3 animate-pulse">
+            <div className="flex items-center gap-3 w-full md:w-auto">
+              <div className="w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
+              <div>
+                <p ref={domLiveStatusRef} className="text-xs font-mono text-indigo-300 font-bold">
+                  {progressStatus || "Active Campaign Dispatch in Progress..."}
+                </p>
+                <div className="text-[11px] text-indigo-400/80 font-mono mt-0.5 flex items-center gap-2">
+                  <span>Remaining: {pendingEmails.length} leads</span>
+                  <span>•</span>
+                  <span>Est. Completion: <strong ref={domEtaRef} className="text-indigo-200">{estimatedTimeRemaining || "Calculating..."}</strong></span>
+                </div>
+              </div>
             </div>
             <button
               type="button"
               onClick={handleStopCampaign}
-              className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-md cursor-pointer"
+              className="w-full md:w-auto px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition shadow-md cursor-pointer"
             >
-              🛑 Pause / Stop
+              🛑 Pause Campaign
             </button>
           </div>
         )}
@@ -1124,599 +793,105 @@ export default function Home() {
         {lastBatchMessage && !loading && (
           <div className="bg-emerald-950/30 border border-emerald-500/30 px-4 py-2.5 rounded-2xl flex items-center justify-between text-xs text-emerald-300 font-medium">
             <span>{lastBatchMessage}</span>
-            <button onClick={() => setLastBatchMessage("")} className="text-slate-400 hover:text-white text-xs cursor-pointer">✕</button>
+            <button type="button" onClick={() => setLastBatchMessage("")} className="text-slate-400 hover:text-white text-xs cursor-pointer">✕</button>
           </div>
         )}
 
+        {/* Setup Form VS Live Dashboard */}
         {!isCampaignStarted ? (
-          <form onSubmit={handleStartCampaign} className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-            <div className="lg:col-span-5 flex flex-col justify-between gap-3">
-              <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg">
-                <div className="flex justify-between items-center">
-                  <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
-                    <span>📅</span> 1. Select Age Group:
-                  </span>
-                  {isVaultLoaded ? (
-                    <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
-                      ✓ {inMemorySenders.length} Vault Accounts Active
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-amber-400 font-mono bg-amber-500/10 border border-amber-500/30 px-2 py-0.5 rounded-md">
-                      Manual Account Mode
-                    </span>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
-                  {(Object.keys(TIER_META) as ProfileTier[]).map((tier) => {
-                    const meta = TIER_META[tier];
-                    const isSelected = selectedTier === tier;
-                    return (
-                      <button
-                        key={tier}
-                        type="button"
-                        disabled={loading}
-                        onClick={() => handleLoadTierAccounts(tier)}
-                        className={`py-1.5 px-1 rounded-xl border text-[10px] font-bold transition flex flex-col items-center justify-center cursor-pointer ${
-                          isSelected
-                            ? `${meta.color} shadow-md scale-105`
-                            : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
-                        }`}
-                      >
-                        <span>{meta.badge}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 🔑 Sender Details */}
-              <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2.5 shadow-lg">
-                <div className={`grid grid-cols-1 ${!isVaultLoaded ? "sm:grid-cols-3" : "sm:grid-cols-2"} gap-2`}>
-                  <InputField
-                    label="Sender Gmail"
-                    type="email"
-                    required
-                    disabled={loading}
-                    value={senderEmail}
-                    onChange={(e) => setSenderEmail(e.target.value)}
-                    placeholder="account1@gmail.com"
-                    className="font-mono text-xs"
-                  />
-
-                  <InputField
-                    label="Display Name"
-                    type="text"
-                    required
-                    disabled={loading}
-                    value={senderName}
-                    onChange={(e) => setSenderName(e.target.value)}
-                    placeholder="e.g. Ruby / Alex"
-                    className="text-xs"
-                  />
-
-                  {!isVaultLoaded && (
-                    <div className="space-y-1">
-                      <div className="flex justify-between items-center">
-                        <label className="text-[10px] font-bold text-slate-300">16-Digit App Password</label>
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="text-[9px] text-indigo-400 hover:text-indigo-300 font-mono cursor-pointer"
-                        >
-                          {showPassword ? "Hide" : "Show"}
-                        </button>
-                      </div>
-                      <input
-                        type={showPassword ? "text" : "password"}
-                        required
-                        disabled={loading}
-                        value={appPassword}
-                        onChange={(e) => setAppPassword(e.target.value)}
-                        placeholder="abcd efgh ijkl mnop"
-                        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-xs font-mono text-indigo-300 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl space-y-2 shadow-lg flex-1 flex flex-col">
-                <div className="flex justify-between items-center flex-wrap gap-2">
-                  <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
-                    <img src="/icons/target-lead.svg" alt="Target" className="w-3.5 h-3.5 object-contain" />
-                    Target Leads Box
-                  </label>
-                  
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <button
-                      type="button"
-                      onClick={handleQuickClean}
-                      className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                    >
-                      ✨ Quick Clean
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isDnsChecking || loading}
-                      onClick={handleDnsMxVerify}
-                      className="px-2.5 py-1 bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                    >
-                      {isDnsChecking ? (
-                        <>
-                          <span className="w-3 h-3 border-2 border-indigo-300 border-t-transparent rounded-full animate-spin"/>
-                          <span>{dnsProgressText || "Checking DNS MX records..."}</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>🌐</span> Run DNS MX Check
-                        </>
-                      )}
-                    </button>
-                    {rejectedData.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setShowRejectedModal(true)}
-                        className="px-2 py-0.5 bg-rose-500/20 text-rose-300 border border-rose-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
-                      >
-                        ⚠️ Rejected ({rejectedData.length})
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                <textarea
-                  required
-                  disabled={loading}
-                  value={rawSheetData}
-                  onChange={(e) => setRawSheetData(e.target.value)}
-                  placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com"
-                  className="w-full flex-1 min-h-[260px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 focus:border-indigo-500 outline-none resize-none leading-relaxed"
-                />
-              </div>
-            </div>
-
-            <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 p-4 sm:p-5 rounded-2xl shadow-lg flex flex-col justify-between">
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-[11px] font-bold text-indigo-300 block mb-1">Account Mode</label>
-                    <select
-                      disabled={loading}
-                      value={accountAgeMode}
-                      onChange={(e) => {
-                        const newMode = e.target.value as AccountAgeMode;
-                        setAccountAgeMode(newMode);
-                        const maxLimit = MODE_CONFIGS[newMode]?.maxLot || 100;
-                        if (batchSize > maxLimit) setBatchSize(maxLimit);
-                      }}
-                      className="w-full bg-slate-950 border border-indigo-500/40 rounded-xl px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-indigo-500 cursor-pointer"
-                    >
-                      <option value="AGED">🟢 Aged (2+ Yrs) - Max 100 (Chunks)</option>
-                      <option value="STANDARD">🟡 Standard (6 Mo-2 Yrs) - Max 50 (Chunks)</option>
-                      <option value="FRESH">🔴 Fresh (&lt;6 Mo) - Max 30 (Chunks)</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-300 block mb-1">Lot Size per Account</label>
-                    <input
-                      type="number"
-                      min={MIN_ALLOWED_BATCH_SIZE}
-                      max={currentMaxLot}
-                      required
-                      disabled={loading}
-                      value={batchSize || ""}
-                      onChange={(e) => handleBatchSizeChange(e.target.value)}
-                      onBlur={handleBatchSizeBlur}
-                      placeholder={String(DEFAULT_BATCH_SIZE)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-indigo-400 font-black outline-none focus:border-indigo-500 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Rotation Settings */}
-                <div className="bg-slate-950 border border-slate-800 p-3 rounded-xl space-y-2">
-                  <label className="text-[11px] font-bold text-indigo-300 block">
-                    🔄 Rotation & Dispatching Settings:
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-                    <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "CONTINUOUS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
-                      <input type="radio" name="rotationModeOption" checked={rotationMode === "CONTINUOUS"} onChange={() => setRotationMode("CONTINUOUS")} />
-                      <span>1. Continuous (Non-Stop RR)</span>
-                    </label>
-                    
-                    <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_N_SENDERS" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
-                      <input type="radio" name="rotationModeOption" checked={rotationMode === "EVERY_N_SENDERS"} onChange={() => setRotationMode("EVERY_N_SENDERS")} />
-                      <span>2. Pause after N Senders (RR)</span>
-                    </label>
-
-                    <label className={`flex items-center gap-2 cursor-pointer p-2 rounded-lg border transition ${rotationMode === "EVERY_SINGLE_SENDER" ? "bg-indigo-950/50 border-indigo-500 text-white" : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"}`}>
-                      <input type="radio" name="rotationModeOption" checked={rotationMode === "EVERY_SINGLE_SENDER"} onChange={() => setRotationMode("EVERY_SINGLE_SENDER")} />
-                      <span>3. Pause Every Sender (Full Lot)</span>
-                    </label>
-                  </div>
-
-                  {rotationMode === "EVERY_N_SENDERS" && (
-                    <div className="pt-2 flex items-center gap-3">
-                      <span className="text-[11px] text-slate-300">Pause after how many senders complete full lot?</span>
-                      <input 
-                        type="number" min={1} max={50} 
-                        value={pauseAfterNSenders}
-                        onChange={(e) => setPauseAfterNSenders(parseInt(e.target.value) || 1)}
-                        className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-indigo-400 font-bold outline-none text-center"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* ⚡ DYNAMIC MULTI-SUBJECT UI (Min 1, Max 5) */}
-                <div className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl space-y-2.5">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[11px] font-bold text-indigo-300 flex items-center gap-1.5">
-                      <span>🎯</span> Subject Line Rotation (No-Repeat Random / Lot Guard)
-                    </label>
-                    <span className="text-[10px] font-mono text-slate-400">
-                      {subjectList.length} / 5 Slots
-                    </span>
-                  </div>
-
-                  <div className="space-y-2">
-                    {subjectList.map((sub, idx) => (
-                      <div key={idx} className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-slate-500 w-4">{idx + 1}.</span>
-                        <input
-                          type="text"
-                          required={idx === 0}
-                          disabled={loading}
-                          value={sub}
-                          onChange={(e) => handleSubjectTextChange(idx, e.target.value)}
-                          placeholder={
-                            idx === 0
-                              ? "e.g. Quick question regarding partnership"
-                              : `Optional alternative subject ${idx + 1}`
-                          }
-                          className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-600 outline-none focus:border-indigo-500"
-                        />
-                        {subjectList.length > 1 && (
-                          <button
-                            type="button"
-                            disabled={loading}
-                            onClick={() => handleRemoveSubjectField(idx)}
-                            className="p-2 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition text-xs font-bold cursor-pointer"
-                            title="Remove Subject Line"
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-
-                  {subjectList.length < 5 && (
-                    <button
-                      type="button"
-                      disabled={loading}
-                      onClick={handleAddSubjectField}
-                      className="text-[11px] font-bold text-indigo-400 hover:text-indigo-300 transition flex items-center gap-1 cursor-pointer pt-1"
-                    >
-                      <span>➕</span> Add Another Subject Line ({subjectList.length}/5)
-                    </button>
-                  )}
-                </div>
-
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[11px] font-bold text-slate-300 flex items-center gap-1">
-                      Email Body Template (Live Editable)
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowPreviewModal(true)}
-                      className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
-                    >
-                      👁️ Spintax Preview
-                    </button>
-                  </div>
-
-                  <textarea
-                    rows={8}
-                    required
-                    disabled={loading}
-                    value={template}
-                    onChange={(e) => setTemplate(e.target.value)}
-                    placeholder="Type your outreach message here..."
-                    className="w-full min-h-[190px] bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:border-indigo-500 outline-none leading-relaxed resize-none"
-                  />
-                </div>
-
-                <InputField
-                  label="Custom Signature & Signoff Details"
-                  type="text"
-                  disabled={loading}
-                  value={customSignoffName}
-                  onChange={(e) => setCustomSignoffName(e.target.value)}
-                  placeholder="e.g. John Doe | Founder at Acme Corp (Optional)"
-                  accentColor="emerald"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white font-black rounded-xl text-xs sm:text-sm transition shadow-xl disabled:opacity-50 flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99] mt-3"
-              >
-                {loading ? (
-                  <>
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    <span>Dispatching Running...</span>
-                  </>
-                ) : (
-                  <span>🚀 Launch Campaign & Send (Automated Non-Stop)</span>
-                )}
-              </button>
-            </div>
-          </form>
+          <CampaignForm
+            loading={loading}
+            selectedTier={selectedTier}
+            isVaultLoaded={isVaultLoaded}
+            inMemorySenders={inMemorySenders}
+            handleLoadTierAccounts={handleLoadTierAccounts}
+            senderEmail={senderEmail}
+            setSenderEmail={setSenderEmail}
+            senderName={senderName}
+            setSenderName={setSenderName}
+            showPassword={showPassword}
+            setShowPassword={setShowPassword}
+            appPassword={appPassword}
+            setAppPassword={setAppPassword}
+            handleQuickClean={handleQuickClean}
+            handleDnsMxVerify={handleDnsMxVerify}
+            isDnsChecking={isDnsChecking}
+            dnsProgressText={dnsProgressText}
+            rejectedData={rejectedData}
+            setShowRejectedModal={setShowRejectedModal}
+            rawSheetData={rawSheetData}
+            setRawSheetData={setRawSheetData}
+            accountAgeMode={accountAgeMode}
+            setAccountAgeMode={setAccountAgeMode}
+            batchSize={batchSize}
+            setBatchSize={setBatchSize}
+            handleBatchSizeChange={handleBatchSizeChange}
+            handleBatchSizeBlur={handleBatchSizeBlur}
+            currentMaxLot={currentMaxLot}
+            rotationMode={rotationMode}
+            setRotationMode={setRotationMode}
+            pauseAfterNSenders={pauseAfterNSenders}
+            setPauseAfterNSenders={setPauseAfterNSenders}
+            subjectList={subjectList}
+            handleSubjectTextChange={handleSubjectTextChange}
+            handleRemoveSubjectField={handleRemoveSubjectField}
+            handleAddSubjectField={handleAddSubjectField}
+            setShowPreviewModal={setShowPreviewModal}
+            template={templateList[activeTemplateTab] || ""}
+            setTemplate={(val: string) => handleTemplateTextChange(activeTemplateTab, val)}
+            templateList={templateList}
+            activeTemplateTab={activeTemplateTab}
+            setActiveTemplateTab={setActiveTemplateTab}
+            handleAddTemplateField={handleAddTemplateField}
+            handleRemoveTemplateField={handleRemoveTemplateField}
+            handleTemplateTextChange={handleTemplateTextChange}
+            customSignoffName={customSignoffName}
+            setCustomSignoffName={setCustomSignoffName}
+            handleStartCampaign={handleStartCampaign}
+          />
         ) : (
-          /* STEP 2: Live Rotation Dashboard */
-          <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
-            {/* ⚡ DYNAMIC ACTION BAR */}
-            <div className="bg-slate-950 border border-indigo-500/30 p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-3 shadow-inner">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-indigo-300">⚡ Dynamic Quick Actions:</span>
-                <button
-                  type="button"
-                  onClick={() => setIsAppendModalOpen(true)}
-                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-bold transition shadow-sm cursor-pointer flex items-center gap-1"
-                >
-                  <span>➕</span> Add More Leads
-                </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-slate-300">Switch Sender Folder:</span>
-                <select
-                  value={selectedFolderToSwitch}
-                  onChange={(e) => {
-                    const tier = e.target.value as ProfileTier;
-                    setSelectedFolderToSwitch(tier);
-                    handleSwitchSenderFolderDirectly(tier);
-                  }}
-                  className="bg-slate-900 text-indigo-300 font-bold text-xs px-3 py-1.5 rounded-lg border border-indigo-500/40 outline-none cursor-pointer"
-                >
-                  {(Object.keys(TIER_META) as ProfileTier[]).map((tier) => (
-                    <option key={tier} value={tier}>
-                      {TIER_META[tier]?.label || tier}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {remainingCount > 0 ? (
-              <form onSubmit={handleResumeOrNextBatch} className="space-y-4 bg-slate-950/80 border border-slate-800/90 p-4 rounded-xl">
-                <div className="flex flex-wrap justify-between items-center border-b border-slate-800 pb-3 gap-2">
-                  <div>
-                    <h3 className="text-xs font-black text-indigo-400 flex items-center gap-2">
-                      <span className={`w-2.5 h-2.5 rounded-full ${loading ? "bg-emerald-400 animate-ping" : "bg-amber-400"}`} />
-                      {loading ? "🚀 Auto-Dispatching Active..." : "⏸️ Campaign Paused - Ready to Resume"}
-                    </h3>
-                    <p className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                      Active Sender: <span className="text-indigo-300 font-bold">{senderEmail}</span> (Turn #{sendersUsedRounds + 1})
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-amber-400 font-mono font-bold bg-amber-500/10 px-2.5 py-1 rounded-full border border-amber-500/20">
-                      Remaining in Queue: {remainingCount}
-                    </span>
-                    {loading ? (
-                      <button
-                        type="button"
-                        onClick={handleStopCampaign}
-                        className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition shadow-md cursor-pointer"
-                      >
-                        🛑 Pause / Stop
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={handleFullReset}
-                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-bold transition border border-slate-700 cursor-pointer"
-                      >
-                        🔄 Reset All
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                <div className={`grid grid-cols-1 ${!isVaultLoaded ? "sm:grid-cols-3" : "sm:grid-cols-2"} gap-3`}>
-                  <InputField
-                    label="Active Sender Gmail"
-                    type="email"
-                    required
-                    disabled={loading}
-                    value={senderEmail}
-                    onChange={(e) => setSenderEmail(e.target.value)}
-                    className="font-mono bg-slate-900 border-slate-700 text-xs"
-                  />
-
-                  <InputField
-                    label="Sender Display Name"
-                    type="text"
-                    required
-                    disabled={loading}
-                    value={senderName}
-                    onChange={(e) => setSenderName(e.target.value)}
-                    className="bg-slate-900 border-slate-700 text-xs"
-                  />
-
-                  {!isVaultLoaded && (
-                    <div className="space-y-1">
-                      <div className="flex justify-between items-center">
-                        <label className="text-[10px] font-bold text-slate-300">Live App Password</label>
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="text-[9px] text-indigo-400 hover:text-indigo-300 font-mono cursor-pointer"
-                        >
-                          {showPassword ? "Hide" : "Show"}
-                        </button>
-                      </div>
-                      <input
-                        type={showPassword ? "text" : "password"}
-                        required
-                        disabled={loading}
-                        value={appPassword}
-                        onChange={(e) => setAppPassword(e.target.value)}
-                        placeholder="16-digit password"
-                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-xs font-mono text-indigo-300 focus:border-indigo-500 outline-none"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                {/* ⚡ LIVE SUBJECT LINES (1-5) IN DASHBOARD */}
-                <div className="space-y-2 pt-1">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[10px] text-slate-300 font-bold flex items-center gap-1">
-                      <span>✏️</span> Live Subject Lines (Rotates with No-Repeat between 1 to 5)
-                    </label>
-                    <span className="text-[9px] font-mono text-slate-500">
-                      {subjectList.length} Active Slots
-                    </span>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    {subjectList.map((sub, idx) => (
-                      <div key={idx} className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-slate-500 w-4">{idx + 1}.</span>
-                        <input
-                          type="text"
-                          value={sub}
-                          onChange={(e) => handleSubjectTextChange(idx, e.target.value)}
-                          placeholder={`Subject Line ${idx + 1}`}
-                          className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-slate-100 outline-none focus:border-indigo-500"
-                        />
-                        {subjectList.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveSubjectField(idx)}
-                            className="p-1.5 text-slate-400 hover:text-rose-400 text-xs font-bold cursor-pointer"
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-
-                  {subjectList.length < 5 && (
-                    <button
-                      type="button"
-                      onClick={handleAddSubjectField}
-                      className="text-[10px] font-bold text-indigo-400 hover:text-indigo-300 transition flex items-center gap-1 cursor-pointer pt-0.5"
-                    >
-                      <span>➕</span> Add Another Subject ({subjectList.length}/5)
-                    </button>
-                  )}
-                </div>
-
-                <InputField
-                  label="✏️ Live Sign-off / Signature"
-                  type="text"
-                  value={customSignoffName}
-                  onChange={(e) => setCustomSignoffName(e.target.value)}
-                  accentColor="emerald"
-                  className="bg-slate-900 border-slate-700"
-                />
-
-                <div className="w-full space-y-1">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[10px] text-slate-300 font-bold">
-                      ✏️ Live Email Template Body (Takes effect immediately on next send/resume)
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowPreviewModal(true)}
-                      className="px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-[9px] font-semibold cursor-pointer"
-                    >
-                      👁️ Spintax Preview
-                    </button>
-                  </div>
-                  <textarea
-                    rows={4}
-                    value={template}
-                    onChange={(e) => setTemplate(e.target.value)}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs text-slate-100 outline-none leading-relaxed resize-none focus:border-indigo-500"
-                  />
-                </div>
-
-                {!loading && (
-                  <button
-                    type="submit"
-                    className="w-full py-3.5 bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-black rounded-xl text-xs sm:text-sm transition-all duration-300 shadow-xl flex justify-center items-center gap-2 cursor-pointer active:scale-[0.99]"
-                  >
-                    <span>▶️ Resume Campaign (Dispatch {currentBatchTarget} Lead(s) via [{senderEmail}])</span>
-                  </button>
-                )}
-              </form>
-            ) : (
-              <div className="p-5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-center rounded-xl font-bold text-xs shadow-inner flex items-center justify-center gap-2">
-                <span>🎉</span> All leads have been processed successfully! You can add more leads above anytime.
-              </div>
-            )}
-          </div>
+          <LiveDashboard
+            setIsAppendModalOpen={setIsAppendModalOpen}
+            selectedFolderToSwitch={selectedFolderToSwitch}
+            setSelectedFolderToSwitch={setSelectedFolderToSwitch}
+            handleSwitchSenderFolderDirectly={handleSwitchSenderFolderDirectly}
+            remainingCount={remainingCount}
+            handleResumeOrNextBatch={handleResumeOrNextBatch}
+            loading={loading}
+            senderEmail={senderEmail}
+            setSenderEmail={setSenderEmail}
+            sendersUsedRounds={sendersUsedRounds}
+            handleStopCampaign={handleStopCampaign}
+            handleFullReset={handleFullReset}
+            isVaultLoaded={isVaultLoaded}
+            senderName={senderName}
+            setSenderName={setSenderName}
+            showPassword={showPassword}
+            setShowPassword={setShowPassword}
+            appPassword={appPassword}
+            setAppPassword={setAppPassword}
+            subjectList={subjectList}
+            handleSubjectTextChange={handleSubjectTextChange}
+            handleRemoveSubjectField={handleRemoveSubjectField}
+            handleAddSubjectField={handleAddSubjectField}
+            customSignoffName={customSignoffName}
+            setCustomSignoffName={setCustomSignoffName}
+            setShowPreviewModal={setShowPreviewModal}
+            template={templateList[activeTemplateTab] || ""}
+            setTemplate={(val: string) => handleTemplateTextChange(activeTemplateTab, val)}
+            currentBatchTarget={currentBatchTarget}
+          />
         )}
       </div>
 
-      {/* ⚡ MODAL FOR ADDING MORE LEADS ON THE FLY */}
-      {isAppendModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
-          <div className="bg-slate-900 border border-indigo-500/40 w-full max-w-lg rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
-              <h3 className="text-sm font-black text-indigo-300 uppercase tracking-wider flex items-center gap-2">
-                <span>➕</span> Add More Leads to Running Queue
-              </h3>
-              <button
-                onClick={() => setIsAppendModalOpen(false)}
-                className="text-slate-400 hover:text-white text-sm bg-slate-800 px-2.5 py-1 rounded-lg cursor-pointer"
-              >
-                ✕ Close
-              </button>
-            </div>
-
-            <form onSubmit={handleAppendMoreLeads} className="space-y-3">
-              <p className="text-xs text-slate-400">
-                Paste your new lead emails below. They will be automatically sanitized, checked, and appended directly to your active queue without losing any progress or resetting counts!
-              </p>
-              <textarea
-                required
-                rows={6}
-                value={appendLeadInput}
-                onChange={(e) => setAppendLeadInput(e.target.value)}
-                placeholder="newlead1@example.com&#10;newlead2@example.com"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-slate-200 outline-none focus:border-indigo-500 resize-none"
-              />
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setIsAppendModalOpen(false)}
-                  className="px-4 py-2 bg-slate-800 text-slate-300 rounded-xl text-xs font-bold cursor-pointer hover:bg-slate-700"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold cursor-pointer shadow-lg"
-                >
-                  Append Leads
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* Modals */}
+      <AppendLeadsModal
+        isOpen={isAppendModalOpen}
+        onClose={() => setIsAppendModalOpen(false)}
+        appendLeadInput={appendLeadInput}
+        setAppendLeadInput={setAppendLeadInput}
+        onSubmit={handleAppendMoreLeads}
+      />
 
       <RejectedLeadsModal
         isOpen={showRejectedModal}
@@ -1725,74 +900,33 @@ export default function Home() {
         stats={rejectedStats}
       />
 
-      {showFailedModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-fadeIn">
-          <div className="bg-slate-900 border border-rose-500/40 w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex justify-between items-center border-b border-slate-800 pb-3">
-              <div>
-                <h3 className="text-sm font-black text-rose-400 uppercase tracking-wider flex items-center gap-2">
-                  <span>🔴</span> Delivery Failed Leads ({failedLeadsList.length})
-                </h3>
-                <p className="text-[11px] text-slate-400 mt-0.5">
-                  These emails could not be delivered by the SMTP provider.
-                </p>
-              </div>
-              <button
-                onClick={() => setShowFailedModal(false)}
-                className="text-slate-400 hover:text-white text-sm bg-slate-800 px-2.5 py-1 rounded-lg cursor-pointer"
-              >
-                ✕ Close
-              </button>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-              <span className="text-[11px] text-slate-400 font-mono">Export / Clipboard Actions:</span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleCopyFailedEmailsOnly}
-                  className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 shadow-sm"
-                >
-                  <span>📧</span>
-                  <span>{copiedType === "EMAILS" ? "✓ Emails Copied!" : "Copy Emails Only"}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleCopyFailedDetailed}
-                  className="px-3 py-1 bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 border border-rose-500/50 rounded-lg text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shadow-sm"
-                >
-                  <span>📋</span>
-                  <span>{copiedType === "DETAILED" ? "✓ Full Log Copied!" : "Copy All (Detailed Log)"}</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="max-h-80 overflow-y-auto space-y-2 pr-1">
-              {failedLeadsList.map((item, idx) => (
-                <div key={idx} className="bg-slate-950 p-3 rounded-xl border border-rose-950/80 flex flex-col sm:flex-row justify-between sm:items-center gap-1 text-xs">
-                  <div>
-                    <span className="font-bold text-white">{item.email}</span>
-                    <p className="text-[10px] text-rose-400 font-mono mt-0.5">{item.reason}</p>
-                  </div>
-                  <div className="text-right">
-                    <span className="text-[10px] text-slate-400 font-mono">Via: {item.senderUsed}</span>
-                    <p className="text-[9px] text-slate-500 font-mono">{item.time}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
+      <FailedLeadsModal
+        isOpen={showFailedModal}
+        onClose={() => setShowFailedModal(false)}
+        failedLeadsList={failedLeadsList}
+        copiedType={copiedType}
+        onCopyFailedEmailsOnly={handleCopyFailedEmailsOnly}
+        onCopyFailedDetailed={handleCopyFailedDetailed}
+      />
 
       <SpintaxPreviewModal
         isOpen={showPreviewModal}
         onClose={() => setShowPreviewModal(false)}
-        template={template}
+        template={templateList[activeTemplateTab] || ""}
         subject={subjectList[0] || ""}
         subjects={subjectList}
         senderName={senderName}
         customSignoffName={customSignoffName}
+      />
+
+      <CampaignAnalyticsDashboard
+        isOpen={showAnalyticsDashboard}
+        onClose={() => setShowAnalyticsDashboard(false)}
+        diagnosticStats={diagnosticStats}
+        senderMetrics={senderMetrics}
+        totalCold={processedCount}
+        totalWarmup={totalWarmupCount}
+        totalRescued={totalRescuedCount}
       />
     </main>
   );

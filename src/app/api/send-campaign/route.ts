@@ -1,3 +1,4 @@
+// src/app/api/send-campaign/route.ts
 import { NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { verifyLicenseAndDevice } from "@/lib/licenseGuard";
@@ -51,7 +52,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 2. Safety rule check
+    // 2. Safety limit enforcement
     const rule = MODE_CONFIGS[accountAgeMode as AccountAgeMode];
     if (rule && recipients.length > rule.maxLot) {
       return NextResponse.json(
@@ -60,7 +61,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 3. License verification
+    // 3. Security and license verification
     const hostHeader = req.headers.get("x-forwarded-host") || req.headers.get("host") || "localhost";
     const guard = await verifyLicenseAndDevice(hostHeader, machineId, sessionToken);
     if (!guard.ok) {
@@ -70,7 +71,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4. Sender credentials
+    // 4. Sender credentials preparation
     const cleanSender = senderEmail.trim().toLowerCase();
     const rawPass = String(appPassword).trim();
     let cleanPassword = rawPass.replace(/\s+/g, "");
@@ -91,9 +92,11 @@ export async function POST(req: Request) {
         port: 465,
         secure: true,
         auth: { user: cleanSender, pass: cleanPassword },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
       });
 
-    // 5. Initial credential test
+    // 5. Initial sender authentication verification
     const initialTest = getFreshTransporter();
     try {
       await initialTest.verify();
@@ -101,20 +104,32 @@ export async function POST(req: Request) {
       const isAuthError = authErr.code === "EAUTH" || authErr.responseCode === 535;
       return NextResponse.json(
         {
-          error: "Authentication failed. Check your Gmail ID or 16-digit App Password.",
+          error: "Authentication failed. Sender Gmail ID or 16-digit App Password is invalid.",
           accountError: true,
           accountErrorType: isAuthError ? "AUTH_FAILED" : "CONNECTION_FAILED",
-          report: recipients.map((email: string) => ({ email, status: "FAILED", error: "Authentication Failed" })),
+          report: recipients.map((email: string) => ({
+            email,
+            status: "FAILED",
+            error: "Sender Authentication Failed",
+          })),
         },
-        { status: 400 }
+        { status: 401 }
       );
     } finally {
       initialTest.close();
     }
 
-    // 6. Dispatch loop
-    const logs: Array<{ email: string; status: "SUCCESS" | "FAILED"; error?: string }> = [];
+    // 6. Template preparation
+    const logs: Array<{
+      email: string;
+      status: "SUCCESS" | "FAILED";
+      error?: string;
+      bounceCode?: number | string;
+      isBadRecipient?: boolean;
+    }> = [];
+
     let isQuotaHit = false;
+    let badRecipientDetected = false;
 
     const cleanUserBody = template
       .trim()
@@ -122,6 +137,7 @@ export async function POST(req: Request) {
       .replace(/^(hope.*?connect)[^\n]*\n+/i, "")
       .trim();
 
+    // 7. Dispatch loop
     for (let i = 0; i < recipients.length; i++) {
       const recipientEmail = recipients[i].trim().toLowerCase();
       if (isQuotaHit) break;
@@ -142,21 +158,64 @@ export async function POST(req: Request) {
           subject: subject.trim(),
           text: plainText,
         });
+
         logs.push({ email: recipientEmail, status: "SUCCESS" });
       } catch (err: any) {
-        const errMessage = err.message || "";
-        const isQuotaErr = /5\.4\.5|quota|limit/i.test(errMessage);
-        logs.push({ email: recipientEmail, status: "FAILED", error: "Failed to send: " + errMessage });
-        if (isQuotaErr) isQuotaHit = true;
+        const errMessage = String(err?.message || "").toLowerCase();
+        const errResponse = String(err?.response || "").toLowerCase();
+        const respCode = err?.responseCode || 0;
+
+        // A. Sender Daily Quota Reached
+        const isQuotaErr = respCode === 550 && /5\.4\.5|quota|limit|daily limit/i.test(errMessage + errResponse);
+        if (isQuotaErr) {
+          isQuotaHit = true;
+          logs.push({
+            email: recipientEmail,
+            status: "FAILED",
+            error: "Sender daily quota exceeded (Google 5.4.5 Daily Limit Reached).",
+          });
+          break;
+        }
+
+        // B. 🎯 Recipient-Side Handshake Rejection (Bad Mailbox / Does Not Exist / Syntax Error)
+        const isBadRecipient =
+          respCode === 550 ||
+          respCode === 553 ||
+          respCode === 501 ||
+          respCode === 554 ||
+          /user not found|does not exist|mailbox unavailable|invalid recipient|no such user|relay denied|syntax error/i.test(
+            errMessage + errResponse
+          );
+
+        if (isBadRecipient) {
+          badRecipientDetected = true;
+          logs.push({
+            email: recipientEmail,
+            status: "FAILED",
+            error: err?.response || "Recipient address not found or rejected by receiving mail server.",
+            bounceCode: respCode || 550,
+            isBadRecipient: true,
+          });
+        } else {
+          // C. General Delivery / Network Failure
+          logs.push({
+            email: recipientEmail,
+            status: "FAILED",
+            error: "Delivery failed: " + (err?.message || "Unknown error"),
+            bounceCode: respCode || "NETWORK_ERROR",
+          });
+        }
       } finally {
         currentTransporter.close();
       }
 
       if (isQuotaHit) break;
-      if (rule && i < recipients.length - 1) await sleepRandom(rule.minDelay, rule.maxDelay);
+      if (rule && i < recipients.length - 1) {
+        await sleepRandom(rule.minDelay, rule.maxDelay);
+      }
     }
 
-    // 7. Final response
+    // 8. Return comprehensive diagnostic response
     return NextResponse.json({
       report: logs,
       sessionToken: guard.sessionToken,
@@ -164,8 +223,10 @@ export async function POST(req: Request) {
       modeApplied: accountAgeMode,
       accountError: isQuotaHit,
       accountErrorType: isQuotaHit ? "QUOTA_EXCEEDED" : null,
+      shouldSwapLeadImmediately: badRecipientDetected,
+      badLeadCount: logs.filter((l) => l.isBadRecipient).length,
     });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Internal server error." }, { status: 500 });
+    return NextResponse.json({ error: error.message || "Internal server error occurred." }, { status: 500 });
   }
 }
