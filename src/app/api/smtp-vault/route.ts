@@ -17,7 +17,7 @@ async function enforceSecurity(req: Request, machineId: string | null | undefine
   if (!guard.ok || !guard.machineId) {
     return { 
       allowed: false, 
-      error: `Access Denied: ${guard.error || "Invalid license or device mismatch."}`, 
+      error: `Access Denied: ${guard.error || "Invalid license or device mismatch."}`,
       status: guard.reason === "NEW_DEVICE" ? 401 : 403 
     };
   }

@@ -55,7 +55,7 @@ export default function OutlookDashboardPage() {
   const [statusMsg, setStatusMsg] = useState<string>("Initializing Vault Accounts...");
   const [showReminderInput, setShowReminderInput] = useState<boolean>(false);
 
-  // 🚀 1. सीधे API /api/smtp-vault से मशीन आईडी के सारे अकाउंट्स गेट (GET) मेथड से लोड करना
+  // 🚀 1. सीधे API /api/smtp-vault से मशीन आईडी और x-session-token के साथ GET मेथड से डेटा लोड करना
   const fetchVaultAccounts = useCallback(async () => {
     if (!machineId) return;
     try {
@@ -69,15 +69,15 @@ export default function OutlookDashboardPage() {
       });
 
       const data = await res.json();
-      if (data.success && Array.isArray(data.accounts)) {
+      if (res.ok && data.accounts && Array.isArray(data.accounts)) {
         setVaultAccounts(data.accounts);
         setStatusMsg(`Loaded ${data.accounts.length} account(s) from Vault. Ready to scan.`);
       } else {
-        setStatusMsg("No accounts found in Vault.");
+        setStatusMsg(data.error || "No accounts found in Vault.");
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error fetching vault accounts:", err);
-      setStatusMsg("Failed to load accounts from Vault.");
+      setStatusMsg("Failed to load accounts from Vault: " + err.message);
     }
   }, [machineId]);
 
@@ -106,7 +106,7 @@ export default function OutlookDashboardPage() {
     setNilList(updateList(nilList));
   };
 
-  // 🚀 2. चंक-बेस्ड स्कैनर (फ़ॉल्ट-टॉलरेंट)
+  // 🚀 2. चंक-बेस्ड एनालिटिक्स स्कैनर
   const fetchAnalytics = useCallback(async () => {
     if (!vaultAccounts || vaultAccounts.length === 0) return;
 
@@ -140,7 +140,10 @@ export default function OutlookDashboardPage() {
       try {
         const res = await fetch("/api/inbox/analytics", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            "x-session-token": storedToken,
+          },
           body: JSON.stringify({
             machineId,
             sessionToken: storedToken,
