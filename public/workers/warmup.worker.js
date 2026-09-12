@@ -12,7 +12,7 @@ let sessionToken = "";
 
 const dispatchedPairs = new Set();
 let senderSentCount = {};
-let senderProcessedTimes = {}; // 👈 केवल सफल मेल वाले यहाँ सेव होंगे
+let senderProcessedTimes = {};
 let currentSenderIndex = 0;
 let currentReceiverIndex = 0;
 
@@ -38,6 +38,7 @@ async function runWarmupLoop() {
       break;
     }
 
+    // ⚡ बाउंड्री सेफ्टी
     if (currentSenderIndex >= activePool.length) {
       currentSenderIndex = 0;
     }
@@ -50,16 +51,20 @@ async function runWarmupLoop() {
       payload: { currentSenderIndex, activeEmail },
     });
 
+    // 🛑 1. पासवर्ड मिसिंग होने पर सेफ रिमूवल
     if (!activeSender.appPassword) {
-      activePool = activePool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
+      activePool.splice(currentSenderIndex, 1);
+      if (currentSenderIndex >= activePool.length) currentSenderIndex = 0;
+
       self.postMessage({
         type: "EVICT_SENDER",
         payload: { email: activeEmail, reason: "Password missing" },
       });
-      await sleep(500);
+      await sleep(200);
       continue;
     }
 
+    // 🛑 2. रिसीवर ढूंढो
     const availableReceivers = receiversPool.filter((r) => {
       const recvEmail = r.email.toLowerCase().trim();
       const pairKey = `${activeEmail}:${recvEmail}`;
@@ -67,12 +72,15 @@ async function runWarmupLoop() {
     });
 
     if (availableReceivers.length === 0) {
-      activePool = activePool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
+      // कोई रिसीवर नहीं बचा तो इस सेंडर को लिस्ट से हटाओ और इंडेक्स संभालो
+      activePool.splice(currentSenderIndex, 1);
+      if (currentSenderIndex >= activePool.length) currentSenderIndex = 0;
       continue;
     }
 
-    const receiverIdx = currentReceiverIndex % availableReceivers.length;
-    const activeReceiver = availableReceivers[receiverIdx];
+    // हमेशा राउंड-रॉबिन रिसीवर चुनो
+    const activeReceiver = availableReceivers[currentReceiverIndex % availableReceivers.length];
+    currentReceiverIndex++;
     const receiverEmail = activeReceiver.email.toLowerCase().trim();
     const pairKey = `${activeEmail}:${receiverEmail}`;
 
@@ -96,9 +104,11 @@ async function runWarmupLoop() {
 
       const data = await res.json().catch(() => ({}));
 
-      // 🛑 ऑथेंटिकेशन फ़ेल होने पर तुरंत एविक्ट करें (कोई टाइमस्टैम्प अपडेट नहीं)
+      // 🛑 3. ऑथेंटिकेशन फ़ेल होने पर सेफ रिमूवल
       if (res.status === 401 || data.accountErrorType === "AUTH_FAILED" || res.status === 403) {
-        activePool = activePool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
+        activePool.splice(currentSenderIndex, 1);
+        if (currentSenderIndex >= activePool.length) currentSenderIndex = 0;
+
         self.postMessage({
           type: "EVICT_SENDER",
           payload: { email: activeEmail, reason: data.error || "Authentication Failed (Google 535)" },
@@ -108,13 +118,12 @@ async function runWarmupLoop() {
       }
 
       if (res.ok && (data.success || data.status === "SUCCESS")) {
-        // ✅ मेल 100% सक्सेसफुल जाने पर ही पेयर और टाइमस्टैम्प लॉक करें
         dispatchedPairs.add(pairKey);
 
         const currentSent = (senderSentCount[activeEmail] || 0) + 1;
         senderSentCount[activeEmail] = currentSent;
         const nowIso = new Date().toISOString();
-        senderProcessedTimes[activeEmail] = nowIso; // 👈 यहाँ फिक्स टाइम अपडेट हुआ
+        senderProcessedTimes[activeEmail] = nowIso;
 
         stats.totalProcessed++;
         if (data.rescued) stats.rescuedCount++;
@@ -127,8 +136,11 @@ async function runWarmupLoop() {
           },
         });
 
+        // ⚡ कोटा पूरा होने पर सेंडर बाहर, नहीं तो अगला सेंडर
         if (currentSent >= targetLotSize) {
-          activePool = activePool.filter((s) => s.email.toLowerCase().trim() !== activeEmail);
+          activePool.splice(currentSenderIndex, 1);
+          if (currentSenderIndex >= activePool.length) currentSenderIndex = 0;
+
           self.postMessage({
             type: "SENDER_LOT_FINISHED",
             payload: {
@@ -138,12 +150,13 @@ async function runWarmupLoop() {
             },
           });
         } else {
-          currentSenderIndex = (currentSenderIndex + 1) % (activePool.length || 1);
+          // असली राउंड-रॉबिन: अगले सेंडर पर जाओ!
+          currentSenderIndex = (currentSenderIndex + 1) % activePool.length;
         }
       } else {
-        // ❌ डिलीवरी फ़ेल होने पर `senderProcessedTimes` में टाइम सेट नहीं होगा!
+        // डिलीवरी फेल होने पर भी सेंडर आगे बढ़ेगा, अटकेगा नहीं
         stats.totalFailed++;
-        currentSenderIndex = (currentSenderIndex + 1) % (activePool.length || 1);
+        currentSenderIndex = (currentSenderIndex + 1) % activePool.length;
         self.postMessage({
           type: "LOG",
           payload: {
@@ -151,12 +164,9 @@ async function runWarmupLoop() {
           },
         });
       }
-
-      currentReceiverIndex = (currentReceiverIndex + 1) % availableReceivers.length;
     } catch (netErr) {
-      // ❌ नेटवर्क एरर पर भी टाइम सेट नहीं होगा
       stats.totalFailed++;
-      currentSenderIndex = (currentSenderIndex + 1) % (activePool.length || 1);
+      currentSenderIndex = (currentSenderIndex + 1) % activePool.length;
       self.postMessage({
         type: "LOG",
         payload: {
