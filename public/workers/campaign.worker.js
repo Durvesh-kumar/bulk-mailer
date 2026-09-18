@@ -4,44 +4,73 @@ let isRunning = false;
 let isPaused = false;
 let isStopRequested = false;
 
-// चालू रनिंग स्टेट का ग्लोबल रेफरेंस (APPEND_LEADS के लिए)
-let activeRunningParams = null;
+let currentQueue = [];
+let sendersList = [];
+let targetLotSize = 10;
+let baseIntervalSec = 5;
+let rotationMode = "ROUND_ROBIN"; // 'ROUND_ROBIN', 'EVERY_SINGLE_SENDER', 'CONTINUOUS'
+let pauseAfterNSenders = 1;
+let machineId = "";
+let sessionToken = "";
+let adminKey = "";
+let customSignoffName = "";
+let accountAgeMode = "NEW";
+let minDelayMsConfig = 3500;
+let maxDelayMsConfig = 6500;
+
+// Wave and template rotation trackers
+let currentWaveIndex = 0;
+let lastWaveTemplate = "";
+let lastWaveSubject = "";
+let currentWaveSubject = "";
+let currentWaveTemplate = "";
+let subjectList = [];
+let templateList = [];
+let defaultTemplate = "";
+
+// Telemetry and diagnostics
+let diagnosticTelemetry = { code550: 0, code552: 0, code553: 0, code554: 0, code421: 0, other: 0 };
+let senderHealthMap = {};
+let totalWarmupCount = 0;
+let totalRescuedCount = 0;
+let pendingRescueJobs = [];
+
+let senderSentCount = {};
+let senderProcessedTimes = {};
+let completedSendersCount = 0;
+let currentSenderIndex = 0;
+
+// Sender cooldown map (24h cooldown tracking)
+let senderCooldownMap = {};
+const COOLDOWN_HOURS = 24;
+
+// Warm-up peer pool and strict 1-to-1 pair tracking
+let unverifiedReceiversQueue = [];
+let verifiedHealthyPeers = [];
+let isAuditorRunning = false;
+let dispatchedWarmupPairs = new Set(); // Key format: senderEmail:::receiverEmail
+let receiverLastUsedMap = {};
+
+let rescueIntervalId = null;
+
+// Dynamic random warmup interval helper (picks 2, 3, or 4 without immediate repetition)
+let lastWarmupInterval = 0;
+function getRandomWarmupInterval() {
+  const options = [2, 3, 4];
+  const available = options.filter((opt) => opt !== lastWarmupInterval);
+  const chosen = available[Math.floor(Math.random() * available.length)];
+  lastWarmupInterval = chosen;
+  return chosen;
+}
+
+let currentColdRoundsCount = 0;
+let nextWarmupAtColdRounds = getRandomWarmupInterval();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const sleepRandomDelay = (min = 3500, max = 6500) => {
   const ms = Math.floor(Math.random() * (max - min + 1)) + min;
   return new Promise((resolve) => setTimeout(resolve, ms));
 };
-
-// 🎯 वेव आधारित राउंड रोटेशन ट्रैकर्स
-let currentWaveIndex = 0;
-let lastWaveTemplate = "";
-let lastWaveSubject = "";
-let currentWaveSubject = "";
-let currentWaveTemplate = "";
-
-let senderSentCount = {};
-let senderProcessedTimes = {};
-let completedSendersCount = 0;
-let senderSessionState = {};
-
-// 📊 टेलीमेट्री व डायग्नोस्टिक्स (डैशबोर्ड से 100% मैप्ड)
-let diagnosticTelemetry = {
-  code550: 0,
-  code552: 0,
-  code553: 0,
-  code554: 0,
-  code421: 0,
-  other: 0,
-};
-let senderHealthMap = {};
-let totalWarmupCount = 0;
-let totalRescuedCount = 0;
-
-let pendingRescueJobs = [];
-let senderUsedReceiversMap = {};
-let verifiedHealthyPeers = [];
-let isAuditorFinished = false;
 
 function recordSenderMetric(email, type) {
   const key = email.toLowerCase().trim();
@@ -64,45 +93,13 @@ function recordDiagnosticCode(code) {
   else diagnosticTelemetry.other++;
 }
 
-function getSenderState(email) {
-  const key = email.toLowerCase().trim();
-  if (!senderSessionState[key]) {
-    senderSessionState[key] = {
-      firstDone: false,
-      coldSentInRun: 0,
-      nextColdTarget: Math.floor(Math.random() * 3) + 2,
-    };
-  }
-  return senderSessionState[key];
-}
+// Background auditor pipeline verifying peers in small chunks
+async function startAuditorPipeline(chunkSize = 3) {
+  if (isAuditorRunning) return;
+  isAuditorRunning = true;
 
-function pickUniquePeerReceiver(senderEmail, peerPool) {
-  const sKey = senderEmail.toLowerCase().trim();
-  if (!senderUsedReceiversMap[sKey]) {
-    senderUsedReceiversMap[sKey] = new Set();
-  }
-
-  const validPeers = peerPool.filter((p) => p.email.toLowerCase().trim() !== sKey);
-  if (validPeers.length === 0) return peerPool[0];
-
-  let uncontactedPeers = validPeers.filter((p) => !senderUsedReceiversMap[sKey].has(p.email.toLowerCase().trim()));
-  if (uncontactedPeers.length === 0) {
-    senderUsedReceiversMap[sKey].clear();
-    uncontactedPeers = validPeers;
-  }
-
-  const chosenPeer = uncontactedPeers[Math.floor(Math.random() * uncontactedPeers.length)];
-  senderUsedReceiversMap[sKey].add(chosenPeer.email.toLowerCase().trim());
-  return chosenPeer;
-}
-
-// ⚡ बैकग्राउंड ऑडिटर
-async function startBackgroundPeerAuditor(allRawPeers, chunkSize = 4) {
-  if (isAuditorFinished || !allRawPeers || allRawPeers.length === 0) return;
-  const queueToVerify = [...allRawPeers];
-
-  while (queueToVerify.length > 0 && isRunning && !isStopRequested) {
-    const chunk = queueToVerify.splice(0, chunkSize);
+  while (unverifiedReceiversQueue.length > 0 && isRunning && !isStopRequested) {
+    const chunk = unverifiedReceiversQueue.splice(0, chunkSize);
     const results = await Promise.allSettled(
       chunk.map(async (peer) => {
         try {
@@ -111,8 +108,8 @@ async function startBackgroundPeerAuditor(allRawPeers, chunkSize = 4) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email: peer.email, appPassword: peer.appPassword }),
           });
-          const data = await res.json();
-          return { peer, active: data.active === true };
+          const data = await res.json().catch(() => ({}));
+          return { peer, active: data.active === true || res.ok };
         } catch (_) {
           return { peer, active: false };
         }
@@ -121,28 +118,29 @@ async function startBackgroundPeerAuditor(allRawPeers, chunkSize = 4) {
 
     results.forEach((res) => {
       if (res.status === "fulfilled" && res.value.active) {
-        const pEmail = res.value.peer.email.toLowerCase().trim();
-        if (!verifiedHealthyPeers.some((p) => p.email.toLowerCase().trim() === pEmail)) {
+        const rawEmail = String(res.value.peer.email).toLowerCase().trim();
+        if (!verifiedHealthyPeers.some((v) => String(v.email).toLowerCase().trim() === rawEmail)) {
           verifiedHealthyPeers.push(res.value.peer);
+          if (!receiverLastUsedMap[rawEmail]) receiverLastUsedMap[rawEmail] = 0;
         }
       }
     });
 
-    await sleep(1000);
+    await sleep(600);
   }
-  isAuditorFinished = true;
+  isAuditorRunning = false;
 }
 
-// 🎯 वेव रोटेशन अपडेटर
-function advanceWaveRoundIfNeeded(isNewRoundStarting, subjectList, templateList, fallbackTemplate) {
+// Wave template and subject rotator
+function advanceWaveRoundIfNeeded(isNewRoundStarting) {
   const cleanSubs = (subjectList || []).map((s) => s.trim()).filter((s) => s.length > 0);
-  const cleanTemps = (Array.isArray(templateList) && templateList.length > 0 ? templateList : [fallbackTemplate || ""])
+  const cleanTemps = (Array.isArray(templateList) && templateList.length > 0 ? templateList : [defaultTemplate || ""])
     .map((t) => (t || "").trim())
     .filter((t) => t.length > 0);
 
   if (!currentWaveSubject || !currentWaveTemplate) {
     currentWaveSubject = cleanSubs.length > 0 ? cleanSubs[0] : "Quick check-in regarding partnership";
-    currentWaveTemplate = cleanTemps.length > 0 ? cleanTemps[0] : (fallbackTemplate || "Hi there, hope you are well.");
+    currentWaveTemplate = cleanTemps.length > 0 ? cleanTemps[0] : (defaultTemplate || "Hi there, hope you are well.");
     lastWaveSubject = currentWaveSubject;
     lastWaveTemplate = currentWaveTemplate;
     return;
@@ -150,513 +148,423 @@ function advanceWaveRoundIfNeeded(isNewRoundStarting, subjectList, templateList,
 
   if (isNewRoundStarting) {
     currentWaveIndex++;
-
     if (cleanSubs.length > 1) {
       const availableSubs = cleanSubs.filter((s) => s !== lastWaveSubject);
-      let nextSub = availableSubs[0];
-      if (cleanSubs.length === 2) {
-        nextSub = cleanSubs[0] === lastWaveSubject ? cleanSubs[1] : cleanSubs[0];
-      } else {
-        const pool = availableSubs.length > 0 ? availableSubs : cleanSubs;
-        nextSub = pool[Math.floor(Math.random() * pool.length)];
-      }
-      currentWaveSubject = nextSub;
-      lastWaveSubject = nextSub;
+      currentWaveSubject = availableSubs.length > 0 ? availableSubs[0] : cleanSubs[0];
+      lastWaveSubject = currentWaveSubject;
     }
-
     if (cleanTemps.length > 1) {
       const availableTemps = cleanTemps.filter((t) => t !== lastWaveTemplate);
-      let nextTemp = availableTemps[0];
-      if (cleanTemps.length === 2) {
-        nextTemp = cleanTemps[0] === lastWaveTemplate ? cleanTemps[1] : cleanTemps[0];
-      } else {
-        const pool = availableTemps.length > 0 ? availableTemps : cleanTemps;
-        nextTemp = pool[Math.floor(Math.random() * pool.length)];
-      }
-      currentWaveTemplate = nextTemp;
-      lastWaveTemplate = nextTemp;
+      currentWaveTemplate = availableTemps.length > 0 ? availableTemps[0] : cleanTemps[0];
+      lastWaveTemplate = currentWaveTemplate;
     }
-
     self.postMessage({
       type: "LIVE_STATUS",
-      payload: {
-        text: `🔄 [Wave Rotated to Round ${currentWaveIndex + 1}] Switched to Next Template & Subject.`,
-      },
+      payload: { text: `[Wave Round ${currentWaveIndex + 1}] Subject and template rotated.` },
     });
   }
 }
 
-function scheduleDelayedRescue(senderEmail, receiverNode, adminKey) {
+// Schedules delayed handshake rescue between 60s and 120s
+function scheduleDelayedRescue(senderEmail, receiverNode) {
   const minDelayMs = 60000;
-  const maxDelayMs = 240000;
+  const maxDelayMs = 120000;
   const randomDelayMs = Math.floor(Math.random() * (maxDelayMs - minDelayMs + 1)) + minDelayMs;
-  const executeAt = Date.now() + randomDelayMs;
-
-  pendingRescueJobs.push({ senderEmail, receiver: receiverNode, adminKey, executeAt });
+  pendingRescueJobs.push({ senderEmail, receiver: receiverNode, executeAt: Date.now() + randomDelayMs });
 }
 
-setInterval(async () => {
-  if (pendingRescueJobs.length === 0) return;
-  const now = Date.now();
-  const readyJobs = pendingRescueJobs.filter((job) => job.executeAt <= now);
-  pendingRescueJobs = pendingRescueJobs.filter((job) => job.executeAt > now);
+// Background rescue polling ticker
+function startRescueWorkerTimer() {
+  if (rescueIntervalId) clearInterval(rescueIntervalId);
+  rescueIntervalId = setInterval(async () => {
+    if (pendingRescueJobs.length === 0) return;
+    const now = Date.now();
+    const readyJobs = pendingRescueJobs.filter((job) => job.executeAt <= now);
+    pendingRescueJobs = pendingRescueJobs.filter((job) => job.executeAt > now);
 
-  for (const job of readyJobs) {
-    try {
-      const res = await fetch("/api/admin/rescue-worker", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-admin-key": job.adminKey || "inboxsend_mesh_secret_2026",
-        },
-        body: JSON.stringify({
-          receiver: {
-            email: job.receiver.email,
-            appPassword: job.receiver.appPassword,
-            senderName: job.receiver.senderName || "",
+    for (const job of readyJobs) {
+      try {
+        const res = await fetch("/api/admin/rescue-worker", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-admin-key": adminKey || "inboxsend_mesh_secret_2026",
           },
-        }),
-      });
-      const data = await res.json();
-      if (data.success && (data.rescued > 0 || data.replied > 0)) {
-        totalRescuedCount += (data.rescued || 1);
-        recordSenderMetric(job.senderEmail, "SPAM_RESCUED");
-        self.postMessage({
-          type: "TELEMETRY_UPDATE",
-          payload: { diagnosticStats: diagnosticTelemetry, senderMetrics: senderHealthMap, totalWarmupCount, totalRescuedCount },
+          body: JSON.stringify({
+            receiver: {
+              email: job.receiver.email,
+              appPassword: job.receiver.appPassword,
+              senderName: job.receiver.senderName || "",
+            },
+          }),
         });
-      }
-    } catch (_) {}
-  }
-}, 8000);
-
-// केवल इस्तेमाल हुए सेंडर्स का टाइम निकालने वाला हेल्पर
-function getOnlyUsedSendersTimes() {
-  const cleanTimes = {};
-  for (const [email, count] of Object.entries(senderSentCount)) {
-    if (count > 0 && senderProcessedTimes[email]) {
-      cleanTimes[email] = senderProcessedTimes[email];
+        const data = await res.json().catch(() => ({}));
+        if (data.success && (data.rescued > 0 || data.replied > 0)) {
+          totalRescuedCount += (data.rescued || 1);
+          recordSenderMetric(job.senderEmail, "SPAM_RESCUED");
+          self.postMessage({
+            type: "TELEMETRY_UPDATE",
+            payload: { diagnosticStats: diagnosticTelemetry, senderMetrics: senderHealthMap, totalWarmupCount, totalRescuedCount },
+          });
+        }
+      } catch (_) {}
     }
-  }
-  return cleanTimes;
+  }, 4000);
 }
 
-async function executeDispatch(params) {
-  activeRunningParams = params;
-  let {
-    currentQueue,
-    sendersList,
-    peerReceivers,
-    senderIdx,
-    roundsDone,
-    currentProcessed,
-    currentSuccess,
-    targetLotSize,
-    mode,
-    activeEmail,
-    activePass,
-    activeName,
-    rotationMode,
-    pauseAfterNSenders,
-    subjectList,
-    template,
-    templateList,
-    customSignoffName,
-    machineId,
-    sessionToken,
-    adminKey,
-    modeConfig,
-  } = params;
+// Global warmup wave: Strictly 1-to-1 verified pair mapping with wait lock
+async function executeGlobalWarmupWave() {
+  self.postMessage({
+    type: "LIVE_STATUS",
+    payload: {
+      text: `[Warmup Shield] Pausing cold queue. Initiating 1-to-1 warmup wave for ${sendersList.length} senders...`,
+    },
+  });
 
-  if (isStopRequested || currentQueue.length === 0 || sendersList.length === 0) {
-    isRunning = false;
-    self.postMessage({
-      type: "QUEUE_FINISHED_OR_STOPPED",
-      payload: {
-        isQueueEmpty: currentQueue.length === 0,
-        areSendersExhausted: sendersList.length === 0,
-        finalProcessed: currentProcessed,
-        finalSuccess: currentSuccess,
-        senderProcessedTimes: getOnlyUsedSendersTimes(),
-        targetLotSize,
-        diagnosticStats: diagnosticTelemetry,
-        senderMetrics: senderHealthMap,
-        totalWarmupCount,
-        totalRescuedCount,
-      },
-    });
-    return;
-  }
+  for (let i = 0; i < sendersList.length; i++) {
+    if (isStopRequested || !isRunning) return;
 
-  advanceWaveRoundIfNeeded(false, subjectList, templateList, template);
+    const sender = sendersList[i];
+    const rawSenderEmail = sender.email.toLowerCase().trim();
 
-  let latestSessionToken = sessionToken;
-  const currentSenderCurrentSent = senderSentCount[activeEmail.toLowerCase()] || 0;
-  const state = getSenderState(activeEmail);
+    let chosenReceiver = null;
+    let waitCount = 0;
 
-  const isRoundRobinMode = rotationMode === "CONTINUOUS" || rotationMode === "EVERY_N_SENDERS";
-  let shouldSendWarmup = false;
-  let warmupType = "";
+    // Strict lock: Wait until an unused verified receiver is ready
+    while (isRunning && !isStopRequested) {
+      const eligible = verifiedHealthyPeers.filter((r) => {
+        const recvEmail = String(r.email).toLowerCase().trim();
+        const pairKey = `${rawSenderEmail}:::${recvEmail}`;
+        return rawSenderEmail !== recvEmail && !dispatchedWarmupPairs.has(pairKey);
+      });
 
-  if (isRoundRobinMode) {
-    if (!state.firstDone) {
-      shouldSendWarmup = true;
-      warmupType = "ROUND_ROBIN_ENTRY";
-    } else if (state.coldSentInRun >= state.nextColdTarget) {
-      shouldSendWarmup = true;
-      warmupType = "ROUND_ROBIN_INTERLEAVED";
-    }
-  }
+      if (eligible.length > 0) {
+        eligible.sort((a, b) => {
+          const tA = receiverLastUsedMap[String(a.email).toLowerCase().trim()] || 0;
+          const tB = receiverLastUsedMap[String(b.email).toLowerCase().trim()] || 0;
+          return tA - tB;
+        });
+        chosenReceiver = eligible[0];
+        break;
+      }
 
-  try {
-    // 🛡️ 1. वार्म-अप शील्ड
-    if (shouldSendWarmup) {
-      const peerPool = verifiedHealthyPeers.length > 0 ? verifiedHealthyPeers : peerReceivers;
-      const chosenPeer = pickUniquePeerReceiver(activeEmail, peerPool);
-
-      if (chosenPeer) {
+      waitCount += 3;
+      if (waitCount % 15 === 0) {
         self.postMessage({
           type: "LIVE_STATUS",
-          payload: { text: `🛡️ [Warmup: ${warmupType}] [${activeEmail}] -> Handshake with [${chosenPeer.email}]...` },
+          payload: { text: `[Warmup Lock] Waiting for verified receiver for ${rawSenderEmail} (${waitCount}s elapsed)...` },
+        });
+      }
+      await sleep(3000);
+    }
+
+    if (isStopRequested || !isRunning) return;
+
+    if (chosenReceiver) {
+      const rawReceiverEmail = chosenReceiver.email.toLowerCase().trim();
+      const pairKey = `${rawSenderEmail}:::${rawReceiverEmail}`;
+
+      self.postMessage({
+        type: "LIVE_STATUS",
+        payload: { text: `[Warmup 1-on-1] [${rawSenderEmail}] -> [${rawReceiverEmail}] (${i + 1}/${sendersList.length})` },
+      });
+
+      try {
+        const warmupRes = await fetch("/api/silent-warmup", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-session-token": sessionToken,
+          },
+          body: JSON.stringify({
+            machineId,
+            sessionToken,
+            senderEmail: rawSenderEmail,
+            receiverEmail: rawReceiverEmail,
+            senderName: sender.senderName || "",
+            appPassword: sender.appPassword,
+          }),
         });
 
-        try {
-          const warmupRes = await fetch("/api/silent-warmup", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "x-session-token": latestSessionToken,
-            },
-            body: JSON.stringify({
-              machineId,
-              senderEmail: activeEmail,
-              receiverEmail: chosenPeer.email,
-              senderName: activeName,
-              appPassword: activePass,
-              sessionToken: latestSessionToken,
-            }),
-          });
-
-          const warmupData = await warmupRes.json();
-          if (warmupData.accountErrorType === "AUTH_FAILED" || warmupRes.status === 401) {
-            const remainingSenders = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
-            if (remainingSenders.length === 0) {
-              self.postMessage({ type: "FATAL_ERROR", message: "All sender accounts evicted due to bad credentials." });
-              isRunning = false;
-              return;
-            }
-            const nextSender = remainingSenders[0];
-            return executeDispatch({
-              ...params,
-              sendersList: remainingSenders,
-              senderIdx: 0,
-              activeEmail: nextSender.email,
-              activePass: nextSender.appPassword,
-              activeName: nextSender.senderName || "Colleague",
-            });
-          }
-
-          if (warmupData.sessionToken) latestSessionToken = warmupData.sessionToken;
+        const wData = await warmupRes.json().catch(() => ({}));
+        if (warmupRes.ok && (wData.success || wData.status === "SUCCESS")) {
+          dispatchedWarmupPairs.add(pairKey);
+          receiverLastUsedMap[rawReceiverEmail] = Date.now();
           totalWarmupCount++;
-          recordSenderMetric(activeEmail, "WARMUP_SENT");
-          scheduleDelayedRescue(activeEmail, chosenPeer, adminKey);
-        } catch (_) {}
+          recordSenderMetric(rawSenderEmail, "WARMUP_SENT");
+          scheduleDelayedRescue(rawSenderEmail, chosenReceiver);
+        }
+      } catch (_) {}
 
-        if (!state.firstDone) state.firstDone = true;
-        state.coldSentInRun = 0;
-        state.nextColdTarget = Math.floor(Math.random() * 3) + 2;
+      await sleepRandomDelay(3000, 5000);
+    }
+  }
 
-        await sleepRandomDelay(3000, 5000);
+  currentColdRoundsCount = 0;
+  nextWarmupAtColdRounds = getRandomWarmupInterval();
+
+  self.postMessage({
+    type: "LIVE_STATUS",
+    payload: {
+      text: `[Warmup Wave Complete] Resuming cold outreach for next ${nextWarmupAtColdRounds} rounds.`,
+    },
+  });
+}
+
+// Main execution loop: Non-recursive while loop
+async function runCampaignWorkflow() {
+  startRescueWorkerTimer();
+
+  const isRoundRobin = rotationMode === "ROUND_ROBIN";
+
+  // Initial warmup wave only runs for ROUND_ROBIN mode
+  if (isRoundRobin && currentColdRoundsCount === 0 && totalWarmupCount === 0) {
+    await executeGlobalWarmupWave();
+  }
+
+  advanceWaveRoundIfNeeded(false);
+
+  while (isRunning && !isStopRequested && currentQueue.length > 0 && sendersList.length > 0) {
+    if (isPaused) {
+      await sleep(1000);
+      continue;
+    }
+
+    // Full round completion trigger in Round-Robin mode
+    if (isRoundRobin && currentSenderIndex >= sendersList.length) {
+      currentSenderIndex = 0;
+      currentColdRoundsCount++;
+      advanceWaveRoundIfNeeded(true);
+
+      if (currentColdRoundsCount >= nextWarmupAtColdRounds) {
+        self.postMessage({
+          type: "LIVE_STATUS",
+          payload: { text: `[Interleaved Wave] Reached ${currentColdRoundsCount} cold rounds. Triggering team warmup...` },
+        });
+        await executeGlobalWarmupWave();
       }
     }
 
-    if (isStopRequested || isPaused) return;
+    if (sendersList.length === 0 || currentQueue.length === 0) break;
 
-    // 🚀 2. कोल्ड लीड डिस्पैच
+    // In EVERY_SINGLE_SENDER mode, keep processing the first sender until lot target is reached
+    if (!isRoundRobin) {
+      currentSenderIndex = 0;
+    }
+
+    const activeSender = sendersList[currentSenderIndex];
+    const rawSenderEmail = activeSender.email.toLowerCase().trim();
+    const currentSent = senderSentCount[rawSenderEmail] || 0;
+
+    // Hard ceiling lock: Evict sender immediately if target lot size reached
+    if (currentSent >= targetLotSize) {
+      completedSendersCount++;
+      const exitTimestamp = Date.now();
+      senderCooldownMap[rawSenderEmail] = {
+        email: rawSenderEmail,
+        exitedAt: exitTimestamp,
+        cooldownUntil: exitTimestamp + COOLDOWN_HOURS * 60 * 60 * 1000,
+        status: "COOLING_DOWN",
+      };
+
+      self.postMessage({
+        type: "SENDER_LOT_COMPLETED",
+        payload: {
+          email: rawSenderEmail,
+          message: `[Lot Target Reached] ${rawSenderEmail} completed ${targetLotSize} emails. Cooldown started.`,
+          cooldown: senderCooldownMap[rawSenderEmail],
+        },
+      });
+
+      sendersList.splice(currentSenderIndex, 1);
+      if (currentSenderIndex >= sendersList.length) currentSenderIndex = 0;
+      continue;
+    }
+
     const coldLead = currentQueue[0];
-    const activeSubject = currentWaveSubject;
-    const activeTemplate = currentWaveTemplate;
-    const currentSentDisplay = currentSenderCurrentSent + 1;
 
     self.postMessage({
       type: "LIVE_STATUS",
       payload: {
-        text: `🚀 [RR Wave ${currentWaveIndex + 1}] [${activeEmail}] (${currentSentDisplay}/${targetLotSize}) -> ${coldLead}`,
+        text: `[${rotationMode}] [${rawSenderEmail}] (${currentSent + 1}/${targetLotSize}) -> ${coldLead}`,
       },
     });
 
-    const res = await fetch("/api/send-campaign", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        senderName: activeName.trim(),
-        senderEmail: activeEmail.trim().toLowerCase(),
-        appPassword: activePass.replace(/\s+/g, ""),
-        recipients: [coldLead],
-        subject: activeSubject,
-        template: activeTemplate.trim(),
-        customSignoffName: customSignoffName.trim(),
-        accountAgeMode: mode,
-        machineId,
-        sessionToken: latestSessionToken,
-      }),
-    });
-
-    const data = await res.json();
-
-    // 🎯 3. डायनामिक लीड स्वैप (550 / 553 / 501 / 552 / 554)
-    if (data.shouldSwapLeadImmediately) {
-      const updatedQueue = currentQueue.slice(1);
-      const errReason = data.report?.[0]?.error || "Recipient address not found (550/501/553)";
-      const bounceCode = data.report?.[0]?.bounceCode || 550;
-
-      recordSenderMetric(activeEmail, "BOUNCE");
-      recordDiagnosticCode(bounceCode);
-
-      const newlyFailed = [{
-        email: coldLead,
-        reason: errReason,
-        senderUsed: activeEmail,
-        time: new Date().toLocaleTimeString(),
-      }];
-
-      self.postMessage({
-        type: "BATCH_CHUNK_DONE",
-        payload: {
-          chunkProcessed: 1,
-          chunkSuccess: 0,
-          newlyFailed,
-          instantProcessed: currentProcessed + 1,
-          instantSuccess: currentSuccess,
-          remainingQueue: updatedQueue,
-          diagnosticStats: diagnosticTelemetry,
-          senderMetrics: senderHealthMap,
-          totalWarmupCount,
-          totalRescuedCount,
-        },
+    try {
+      const res = await fetch("/api/send-campaign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          senderName: activeSender.senderName || "Colleague",
+          senderEmail: rawSenderEmail,
+          appPassword: activeSender.appPassword.replace(/\s+/g, ""),
+          recipients: [coldLead],
+          subject: currentWaveSubject,
+          template: currentWaveTemplate.trim(),
+          customSignoffName: customSignoffName.trim(),
+          accountAgeMode,
+          machineId,
+          sessionToken,
+        }),
       });
 
-      const updatedSenderSent = currentSenderCurrentSent + 1;
-      senderSentCount[activeEmail.toLowerCase()] = updatedSenderSent;
-      senderProcessedTimes[activeEmail.toLowerCase()] = new Date().toISOString();
+      const data = await res.json().catch(() => ({}));
 
-      let activePool = sendersList;
-      let nextIdx = (senderIdx + 1) % activePool.length;
+      if (data.shouldSwapLeadImmediately) {
+        currentQueue.shift();
+        const errReason = data.report?.[0]?.error || "Address not found (550/501/553)";
+        recordSenderMetric(rawSenderEmail, "BOUNCE");
+        recordDiagnosticCode(data.report?.[0]?.bounceCode || 550);
 
-      // 🛑 सख्त लॉट साइज लिमिट चेक
-      if (updatedSenderSent >= targetLotSize) {
-        completedSendersCount += 1;
-        self.postMessage({ type: "SENDER_LOT_COMPLETED", email: activeEmail });
-        activePool = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
-        if (activePool.length > 0) {
-          nextIdx = senderIdx % activePool.length;
+        self.postMessage({
+          type: "BATCH_CHUNK_DONE",
+          payload: {
+            chunkProcessed: 1,
+            chunkSuccess: 0,
+            newlyFailed: [{ email: coldLead, reason: errReason, senderUsed: rawSenderEmail, time: new Date().toLocaleTimeString() }],
+            remainingQueue: currentQueue,
+            diagnosticStats: diagnosticTelemetry,
+            senderMetrics: senderHealthMap,
+            totalWarmupCount,
+            totalRescuedCount,
+          },
+        });
+      } else {
+        const report = data.report?.[0] || {};
+        const isSuccess = report.status === "SUCCESS";
+        currentQueue.shift();
+
+        if (isSuccess) {
+          recordSenderMetric(rawSenderEmail, "COLD_SENT");
+        } else {
+          recordSenderMetric(rawSenderEmail, "BOUNCE");
+          recordDiagnosticCode(report.bounceCode || 0);
+        }
+
+        self.postMessage({
+          type: "BATCH_CHUNK_DONE",
+          payload: {
+            chunkProcessed: 1,
+            chunkSuccess: isSuccess ? 1 : 0,
+            newlyFailed: !isSuccess ? [{ email: coldLead, reason: report.error || "Delivery Refused", senderUsed: rawSenderEmail, time: new Date().toLocaleTimeString() }] : [],
+            remainingQueue: currentQueue,
+            diagnosticStats: diagnosticTelemetry,
+            senderMetrics: senderHealthMap,
+            totalWarmupCount,
+            totalRescuedCount,
+          },
+        });
+      }
+
+      const updatedCount = currentSent + 1;
+      senderSentCount[rawSenderEmail] = updatedCount;
+      senderProcessedTimes[rawSenderEmail] = new Date().toISOString();
+
+      if (updatedCount >= targetLotSize) {
+        completedSendersCount++;
+        const exitTimestamp = Date.now();
+        senderCooldownMap[rawSenderEmail] = {
+          email: rawSenderEmail,
+          exitedAt: exitTimestamp,
+          cooldownUntil: exitTimestamp + COOLDOWN_HOURS * 60 * 60 * 1000,
+          status: "COOLING_DOWN",
+        };
+
+        self.postMessage({
+          type: "SENDER_LOT_COMPLETED",
+          payload: {
+            email: rawSenderEmail,
+            message: `[Lot Target Reached] ${rawSenderEmail} completed ${updatedCount}/${targetLotSize} emails. Cooldown started.`,
+            cooldown: senderCooldownMap[rawSenderEmail],
+          },
+        });
+
+        sendersList.splice(currentSenderIndex, 1);
+        if (currentSenderIndex >= sendersList.length) currentSenderIndex = 0;
+      } else {
+        if (isRoundRobin) {
+          currentSenderIndex = (currentSenderIndex + 1) % (sendersList.length || 1);
         }
       }
 
-      if (activePool.length === 0 || updatedQueue.length === 0) {
-        return executeDispatch({
-          ...params,
-          currentQueue: updatedQueue,
-          sendersList: activePool,
-          currentProcessed: currentProcessed + 1,
-          currentSuccess: currentSuccess,
-        });
+    } catch (netErr) {
+      recordSenderMetric(rawSenderEmail, "BOUNCE");
+      if (isRoundRobin) {
+        currentSenderIndex = (currentSenderIndex + 1) % (sendersList.length || 1);
       }
-
-      const nextSender = activePool[nextIdx];
-      return executeDispatch({
-        ...params,
-        currentQueue: updatedQueue,
-        sendersList: activePool,
-        senderIdx: nextIdx,
-        currentProcessed: currentProcessed + 1,
-        currentSuccess: currentSuccess,
-        activeEmail: nextSender.email,
-        activePass: nextSender.appPassword,
-        activeName: nextSender.senderName || "Colleague",
-      });
     }
-
-    if (data.accountError || res.status === 400 || res.status === 401) {
-      const remainingSenders = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
-      if (remainingSenders.length === 0) {
-        self.postMessage({ type: "FATAL_ERROR", message: "All sender accounts exhausted." });
-        isRunning = false;
-        return;
-      }
-      const nextSender = remainingSenders[0];
-      return executeDispatch({
-        ...params,
-        sendersList: remainingSenders,
-        senderIdx: 0,
-        activeEmail: nextSender.email,
-        activePass: nextSender.appPassword,
-        activeName: nextSender.senderName || "Colleague",
-      });
-    }
-
-    if (res.status === 403) {
-      self.postMessage({ type: "SUSPENDED" });
-      isRunning = false;
-      return;
-    }
-
-    if (data.sessionToken) {
-      latestSessionToken = data.sessionToken;
-      self.postMessage({ type: "UPDATE_SESSION_TOKEN", sessionToken: latestSessionToken });
-    }
-
-    const report = data.report?.[0] || {};
-    const isSuccess = report.status === "SUCCESS";
-    
-    if (isSuccess) {
-      recordSenderMetric(activeEmail, "COLD_SENT");
-    } else {
-      recordSenderMetric(activeEmail, "BOUNCE");
-      // 🛑 सटीक कोड टेलीमेट्री में जोड़ें (421, 552 या अन्य)
-      recordDiagnosticCode(report.bounceCode || 0);
-    }
-
-    const newlyFailed = !isSuccess
-      ? [{ email: coldLead, reason: report.error || "Delivery Refused", senderUsed: activeEmail, time: new Date().toLocaleTimeString() }]
-      : [];
-
-    const updatedTotalProcessed = currentProcessed + 1;
-    const updatedTotalSuccess = currentSuccess + (isSuccess ? 1 : 0);
-    const updatedQueue = currentQueue.slice(1);
 
     self.postMessage({
-      type: "BATCH_CHUNK_DONE",
-      payload: {
-        chunkProcessed: 1,
-        chunkSuccess: isSuccess ? 1 : 0,
-        newlyFailed,
-        instantProcessed: updatedTotalProcessed,
-        instantSuccess: updatedTotalSuccess,
-        remainingQueue: updatedQueue,
-        diagnosticStats: diagnosticTelemetry,
-        senderMetrics: senderHealthMap,
-        totalWarmupCount,
-        totalRescuedCount,
-      },
+      type: "TELEMETRY_UPDATE",
+      payload: { diagnosticStats: diagnosticTelemetry, senderMetrics: senderHealthMap, totalWarmupCount, totalRescuedCount },
     });
 
-    state.coldSentInRun += 1;
-    const updatedSenderSent = currentSenderCurrentSent + 1;
-    senderSentCount[activeEmail.toLowerCase()] = updatedSenderSent;
-    senderProcessedTimes[activeEmail.toLowerCase()] = new Date().toISOString();
-
-    let activePool = sendersList;
-    let nextIdx = (senderIdx + 1) % activePool.length;
-    let senderJustCompletedLot = false;
-
-    // 🛑 सख्त लॉट साइज लिमिट चेक
-    if (updatedSenderSent >= targetLotSize) {
-      senderJustCompletedLot = true;
-      completedSendersCount += 1;
-      self.postMessage({ type: "SENDER_LOT_COMPLETED", email: activeEmail });
-      activePool = sendersList.filter((s) => s.email.toLowerCase() !== activeEmail.toLowerCase());
-      if (activePool.length > 0) {
-        nextIdx = senderIdx % activePool.length;
-      }
-    }
-
-    if (activePool.length === 0 || updatedQueue.length === 0) {
-      return executeDispatch({
-        ...params,
-        currentQueue: updatedQueue,
-        sendersList: activePool,
-        currentProcessed: updatedTotalProcessed,
-        currentSuccess: updatedTotalSuccess,
-      });
-    }
-
-    const isNewRoundStarting = nextIdx === 0;
-    if (isNewRoundStarting) {
-      advanceWaveRoundIfNeeded(true, subjectList, templateList, template);
-    }
-
-    const nextSender = activePool[nextIdx];
-    const updatedRounds = roundsDone + 1;
-
-    self.postMessage({
-      type: "ROUND_DONE",
-      payload: {
-        remainingQueue: updatedQueue,
-        updatedTotalProcessed,
-        updatedTotalSuccess,
-        updatedRounds,
-        activePool,
-        nextSenderIndex: nextIdx,
-        nextSender,
-        lastBatchMessage: `✅ [${activeEmail}] Delivered to ${coldLead} (${updatedSenderSent}/${targetLotSize})`,
-      },
-    });
-
-    let shouldPause = false;
-    let pauseMessage = "";
-
-    if (rotationMode === "EVERY_SINGLE_SENDER" && senderJustCompletedLot) {
-      shouldPause = true;
-      pauseMessage = `⏸️ [Sender Lot Finished] Sender [${activeEmail}] completed lot. Click Resume for next sender.`;
-    }
-
-    if (rotationMode === "EVERY_N_SENDERS" && senderJustCompletedLot) {
-      const targetN = Math.max(1, pauseAfterNSenders);
-      if (completedSendersCount > 0 && completedSendersCount % targetN === 0) {
-        shouldPause = true;
-        pauseMessage = `⏸️ [Batch of ${targetN} Senders Completed] Click Resume to continue!`;
-      }
-    }
-
-    if (shouldPause) {
-      isPaused = true;
-      isRunning = false;
-      self.postMessage({ type: "PAUSE_REQUIRED", message: pauseMessage });
-      return;
-    }
-
-    const minD = modeConfig?.minDelay || 3500;
-    const maxD = modeConfig?.maxDelay || 6500;
-    await sleepRandomDelay(minD, maxD);
-
-    if (!isStopRequested && !isPaused) {
-      return executeDispatch({
-        ...params,
-        currentQueue: updatedQueue,
-        sendersList: activePool,
-        senderIdx: nextIdx,
-        roundsDone: updatedRounds,
-        currentProcessed: updatedTotalProcessed,
-        currentSuccess: updatedTotalSuccess,
-        activeEmail: nextSender.email,
-        activePass: nextSender.appPassword,
-        activeName: nextSender.senderName || "Colleague",
-        sessionToken: latestSessionToken,
-      });
-    }
-  } catch (err) {
-    await sleep(4000);
-    if (!isStopRequested && !isPaused) {
-      return executeDispatch(params);
-    }
+    await sleepRandomDelay(minDelayMsConfig, maxDelayMsConfig);
   }
+
+  isRunning = false;
+  self.postMessage({
+    type: "QUEUE_FINISHED_OR_STOPPED",
+    payload: {
+      isQueueEmpty: currentQueue.length === 0,
+      areSendersExhausted: sendersList.length === 0,
+      senderProcessedTimes,
+      diagnosticStats: diagnosticTelemetry,
+      senderMetrics: senderHealthMap,
+      totalWarmupCount,
+      totalRescuedCount,
+    },
+  });
 }
 
+// Message Dispatcher
 self.onmessage = async (e) => {
   const { action, payload } = e.data;
 
-  // 🛑 1. बीच में नई लीड्स जोड़ने का नया लिसनर (Live Sync with UI)
+  // Dynamic queue appending
   if (action === "APPEND_LEADS") {
-    const { newLeads } = payload;
-    if (Array.isArray(newLeads) && newLeads.length > 0 && activeRunningParams) {
-      activeRunningParams.currentQueue = [...activeRunningParams.currentQueue, ...newLeads];
+    if (Array.isArray(payload.newLeads) && payload.newLeads.length > 0) {
+      currentQueue.push(...payload.newLeads);
+      self.postMessage({
+        type: "LIVE_STATUS",
+        payload: { text: `[Queue Appended] +${payload.newLeads.length} leads added. Total in queue: ${currentQueue.length}` },
+      });
+
+      if (!isRunning && sendersList.length > 0) {
+        isRunning = true;
+        isStopRequested = false;
+        isPaused = false;
+        runCampaignWorkflow();
+      }
+    }
+    return;
+  }
+
+  // Explicit manual tier swapping
+  if (action === "SWAP_SENDERS") {
+    const { newSendersList, newTargetLotSize } = payload;
+    if (Array.isArray(newSendersList) && newSendersList.length > 0) {
+      sendersList = [...newSendersList];
+      currentSenderIndex = 0;
+      if (newTargetLotSize) targetLotSize = newTargetLotSize;
+
+      sendersList.forEach((s) => {
+        senderSentCount[s.email.toLowerCase().trim()] = 0;
+      });
+
       self.postMessage({
         type: "LIVE_STATUS",
         payload: {
-          text: `📥 [Queue Appended] +${newLeads.length} leads added to active queue. Total left: ${activeRunningParams.currentQueue.length}`,
+          text: `[Tier Swapped] Loaded ${sendersList.length} new senders with target lot ${targetLotSize}.`,
         },
       });
+
+      if (!isRunning && currentQueue.length > 0 && sendersList.length > 0) {
+        isRunning = true;
+        isPaused = false;
+        isStopRequested = false;
+        runCampaignWorkflow();
+      }
     }
     return;
   }
@@ -666,78 +574,86 @@ self.onmessage = async (e) => {
     isPaused = false;
     isStopRequested = false;
 
+    currentQueue = [...(payload.currentQueue || [])];
+    sendersList = [...(payload.sendersList || [])];
+    targetLotSize = payload.targetLotSize || 10;
+    rotationMode = payload.rotationMode || "ROUND_ROBIN";
+    pauseAfterNSenders = payload.pauseAfterNSenders || 1;
+
+    machineId = payload.machineId || "";
+    sessionToken = payload.sessionToken || "";
+    adminKey = payload.adminKey || "";
+    customSignoffName = payload.customSignoffName || "";
+    accountAgeMode = payload.mode || "NEW";
+
+    minDelayMsConfig = payload.modeConfig?.minDelay || 3500;
+    maxDelayMsConfig = payload.modeConfig?.maxDelay || 6500;
+
+    subjectList = payload.subjectList || [];
+    templateList = payload.templateList || [];
+    defaultTemplate = payload.template || "";
+
     currentWaveIndex = 0;
-    lastWaveTemplate = "";
     lastWaveSubject = "";
+    lastWaveTemplate = "";
     currentWaveSubject = "";
     currentWaveTemplate = "";
 
-    diagnosticTelemetry = { code550: 0, code552: 0, code553: 0, code554: 0, code421: 0, other: 0 };
-    senderHealthMap = {};
-    totalWarmupCount = 0;
-    totalRescuedCount = 0;
-
     senderSentCount = {};
     senderProcessedTimes = {};
-    senderSessionState = {};
-    senderUsedReceiversMap = {};
+    currentSenderIndex = 0;
     completedSendersCount = 0;
-    verifiedHealthyPeers = [];
-    isAuditorFinished = false;
 
-    payload.sendersList.forEach((s) => {
-      senderSentCount[s.email.toLowerCase()] = 0;
-      senderUsedReceiversMap[s.email.toLowerCase()] = new Set();
+    dispatchedWarmupPairs.clear();
+
+    sendersList.forEach((s) => {
+      senderSentCount[s.email.toLowerCase().trim()] = 0;
     });
 
-    const isRoundRobin = payload.rotationMode === "CONTINUOUS" || payload.rotationMode === "EVERY_N_SENDERS";
-    if (isRoundRobin) {
-      startBackgroundPeerAuditor(payload.peerReceivers || [], 4);
+    if (rotationMode === "ROUND_ROBIN") {
+      if (payload.peerReceivers && Array.isArray(payload.peerReceivers)) {
+        const incoming = payload.peerReceivers.filter(
+          (p) => !verifiedHealthyPeers.some((v) => String(v.email).toLowerCase().trim() === String(p.email).toLowerCase().trim())
+        );
+        unverifiedReceiversQueue = [...incoming];
+      }
+      startAuditorPipeline(3);
     }
 
-    await executeDispatch(payload);
-  }
-
-  if (action === "RESUME") {
-    isRunning = true;
-    isPaused = false;
-    isStopRequested = false;
-    await executeDispatch(payload);
+    await runCampaignWorkflow();
   }
 
   if (action === "STOP" || action === "PAUSE") {
     isStopRequested = true;
     isPaused = true;
     isRunning = false;
-    self.postMessage({ 
-      type: "PAUSED",
-      payload: {
-        senderProcessedTimes: getOnlyUsedSendersTimes()
-      }
-    });
+    if (rescueIntervalId) clearInterval(rescueIntervalId);
+    self.postMessage({ type: "PAUSED", payload: { senderProcessedTimes } });
   }
 
   if (action === "RESET") {
     isStopRequested = true;
     isRunning = false;
     isPaused = false;
-    activeRunningParams = null;
-    currentWaveIndex = 0;
-    lastWaveTemplate = "";
-    lastWaveSubject = "";
-    currentWaveSubject = "";
-    currentWaveTemplate = "";
+    if (rescueIntervalId) clearInterval(rescueIntervalId);
+
+    currentQueue = [];
+    sendersList = [];
+    unverifiedReceiversQueue = [];
+    verifiedHealthyPeers = [];
+    dispatchedWarmupPairs.clear();
+    receiverLastUsedMap = {};
+    senderSentCount = {};
+    senderProcessedTimes = {};
+    senderCooldownMap = {};
     diagnosticTelemetry = { code550: 0, code552: 0, code553: 0, code554: 0, code421: 0, other: 0 };
     senderHealthMap = {};
     totalWarmupCount = 0;
     totalRescuedCount = 0;
-    senderSentCount = {};
-    senderProcessedTimes = {};
-    senderSessionState = {};
-    senderUsedReceiversMap = {};
     pendingRescueJobs = [];
-    completedSendersCount = 0;
-    verifiedHealthyPeers = [];
-    isAuditorFinished = false;
+    currentSenderIndex = 0;
+    isAuditorRunning = false;
+
+    self.postMessage({ type: "LOG", payload: { text: "Worker reset completed." } });
   }
 };
