@@ -62,7 +62,6 @@ export default function CampaignForm(props: CampaignFormProps) {
   const activeTab = props.activeTemplateTab || 0;
   const currentRotation = props.rotationMode || "CONTINUOUS";
 
-  // वर्तमान मोड के आधार पर मैक्स लिमिट निकालें (FRESH=20, MID=50, AGED=100)
   const currentMaxAllowed = MODE_CONFIGS[props.accountAgeMode]?.maxLot || 100;
 
   const ageGroupOptions: { label: string; tier: ProfileTier; mode: AccountAgeMode; maxAllowed: number; icon: string }[] = [
@@ -76,17 +75,14 @@ export default function CampaignForm(props: CampaignFormProps) {
   const handleAgeGroupClick = (item: typeof ageGroupOptions[0]) => {
     props.handleLoadTierAccounts(item.tier);
     props.setAccountAgeMode(item.mode);
-    
-    // यदि मौजूदा बैच साइज नए मैक्स से ज्यादा है, तो उसे मैक्स पर सेट करें, अन्यथा 10 (या मिनिमम 1) पर रखें
     const targetSize = Math.min(10, item.maxAllowed);
     props.setBatchSize(Math.max(1, targetSize));
   };
 
-  // सुरक्षित लॉट साइज चेंजर (डिफ़ॉल्ट 10, मिनिमम 1, मैक्सिमम टियर लिमिट)
   const onSecureBatchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     if (val === "") {
-      props.setBatchSize(10); // डिफ़ॉल्ट 10
+      props.setBatchSize(10);
       return;
     }
     const num = parseInt(val, 10);
@@ -103,7 +99,7 @@ export default function CampaignForm(props: CampaignFormProps) {
 
   const onSecureBatchBlur = () => {
     if (!props.batchSize || props.batchSize < 1) {
-      props.setBatchSize(10); // खाली होने पर डिफ़ॉल्ट 10 पर लौटेगा
+      props.setBatchSize(10);
     } else if (props.batchSize > currentMaxAllowed) {
       props.setBatchSize(currentMaxAllowed);
     }
@@ -113,13 +109,10 @@ export default function CampaignForm(props: CampaignFormProps) {
     <form onSubmit={props.handleStartCampaign} className="w-full">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
         
-        {/* ================= LEFT COLUMN: SENDER & LEADS (col-span-5) ================= */}
+        {/* LEFT COLUMN: SENDER & LEADS */}
         <div className="lg:col-span-5 flex flex-col justify-between space-y-4">
           
-          {/* Sender Credentials Card */}
           <div className="bg-[#0b132b]/90 border border-blue-900/50 hover:border-blue-500/40 transition-all p-4 sm:p-5 rounded-2xl space-y-4 shadow-[0_8px_30px_rgb(0,0,0,0.4)] backdrop-blur-md">
-            
-            {/* Age Group Header */}
             <div className="flex items-center justify-between">
               <span className="text-xs font-mono text-blue-300 font-bold tracking-wide flex items-center gap-1.5">
                 <span className="text-blue-400">1.</span> Select Age Group (Syncs Mode &amp; Limits):
@@ -127,7 +120,6 @@ export default function CampaignForm(props: CampaignFormProps) {
               <span className="text-[10px] text-slate-400 font-mono tracking-wide bg-blue-950/60 px-2 py-0.5 rounded border border-blue-900/40">Auto-Mode Sync</span>
             </div>
 
-            {/* Age Group Pills */}
             <div className="flex flex-wrap items-center gap-2">
               {ageGroupOptions.map((item, idx) => {
                 const isActive = props.selectedTier === item.tier && props.accountAgeMode === item.mode;
@@ -149,10 +141,7 @@ export default function CampaignForm(props: CampaignFormProps) {
               })}
             </div>
 
-            {/* 2-Row Grid for Inputs */}
             <div className="space-y-3 pt-1">
-              
-              {/* First Row: 2 Columns */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-[11px] font-mono text-slate-300 block mb-1 font-medium">Sender Gmail</label>
@@ -161,7 +150,7 @@ export default function CampaignForm(props: CampaignFormProps) {
                     value={props.senderEmail}
                     onChange={(e) => props.setSenderEmail(e.target.value)}
                     placeholder="account1@gmail.com"
-                    className="w-full bg-[#050814] border border-blue-950/80 rounded-xl px-3 py-2 text-xs text-blue-100 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono transition shadow-inner"
+                    className="w-full bg-[#050814] border border-blue-950/80 rounded-xl px-3 py-2 text-xs text-blue-100 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 font-mono transition shadow-inner"
                     required
                   />
                 </div>
@@ -173,13 +162,12 @@ export default function CampaignForm(props: CampaignFormProps) {
                     value={props.senderName}
                     onChange={(e) => props.setSenderName(e.target.value)}
                     placeholder="e.g. Ruby / Alex"
-                    className="w-full bg-[#050814] border border-blue-950/80 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-sans transition shadow-inner"
+                    className="w-full bg-[#050814] border border-blue-950/80 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 font-sans transition shadow-inner"
                     required
                   />
                 </div>
               </div>
 
-              {/* Second Row: Full Width App Password */}
               <div>
                 <div className="flex justify-between items-center mb-1">
                   <label className="text-[11px] font-mono text-slate-300 font-medium">16-Digit App Password</label>
@@ -196,16 +184,13 @@ export default function CampaignForm(props: CampaignFormProps) {
                   value={props.appPassword}
                   onChange={(e) => props.setAppPassword(e.target.value)}
                   placeholder="abcd efgh ijkl mnop"
-                  className="w-full bg-[#050814] border border-blue-950/80 rounded-xl px-3.5 py-2 text-xs text-blue-200 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono tracking-wider transition shadow-inner"
+                  className="w-full bg-[#050814] border border-blue-950/80 rounded-xl px-3.5 py-2 text-xs text-blue-200 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 font-mono tracking-wider transition shadow-inner"
                   required={!props.isVaultLoaded}
                 />
               </div>
-
             </div>
-
           </div>
 
-          {/* Target Leads Box (Full Stretch Height) */}
           <div className="bg-[#0b132b]/90 border border-blue-900/50 hover:border-blue-500/40 transition-all p-4 sm:p-5 rounded-2xl flex-1 flex flex-col shadow-[0_8px_30px_rgb(0,0,0,0.4)] backdrop-blur-md">
             <div className="flex items-center justify-between pb-2.5 border-b border-blue-950/70">
               <span className="text-xs font-mono text-blue-200 font-bold flex items-center gap-2">
@@ -234,8 +219,8 @@ export default function CampaignForm(props: CampaignFormProps) {
               <textarea
                 value={props.rawSheetData}
                 onChange={(e) => props.setRawSheetData(e.target.value)}
-                placeholder="lead1@example.com&#10;lead2@example.com&#10;lead3@example.com&#10;Paste all target leads here..."
-                className="w-full flex-1 min-h-[350px] bg-[#050814] border border-blue-950 rounded-xl p-3.5 text-xs text-blue-100 placeholder:text-slate-600 font-mono focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 no-scrollbar leading-relaxed resize-none shadow-inner"
+                placeholder="lead1@example.com&#10;lead2@example.com&#10;Paste target leads here..."
+                className="w-full flex-1 min-h-[350px] bg-[#050814] border border-blue-950 rounded-xl p-3.5 text-xs text-blue-100 placeholder:text-slate-600 font-mono focus:outline-none focus:border-blue-500 no-scrollbar leading-relaxed resize-none shadow-inner"
                 required
               />
             </div>
@@ -243,13 +228,11 @@ export default function CampaignForm(props: CampaignFormProps) {
 
         </div>
 
-        {/* ================= RIGHT COLUMN: ROTATION, SUBJECTS, TEMPLATES & BUTTON (col-span-7) ================= */}
+        {/* RIGHT COLUMN: ROTATION & SETTINGS */}
         <div className="lg:col-span-7 flex flex-col justify-between space-y-4">
           
-          {/* Settings & Rotation Card */}
           <div className="bg-[#0b132b]/90 border border-blue-900/50 hover:border-blue-500/40 transition-all p-4 sm:p-5 rounded-2xl space-y-3.5 shadow-[0_8px_30px_rgb(0,0,0,0.4)] backdrop-blur-md">
             
-            {/* Lot Size per Account with Dynamic Max Limit Badge */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
               <div>
                 <div className="flex justify-between items-center mb-1">
@@ -278,7 +261,6 @@ export default function CampaignForm(props: CampaignFormProps) {
               </div>
             </div>
 
-            {/* Rotation Settings */}
             <div>
               <span className="text-[11px] font-mono text-blue-300 block mb-1.5 font-bold tracking-wide">
                 Rotation &amp; Dispatching Settings:
@@ -286,8 +268,8 @@ export default function CampaignForm(props: CampaignFormProps) {
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 {[
                   { id: "CONTINUOUS", label: "1. Continuous (Non-Stop RR)" },
-                  { id: "EVERY_N_SENDERS", label: "2. Pause after N Senders (RR)" },
-                  { id: "EVERY_SINGLE_SENDER", label: "3. Pause Every Sender (Full Lot)" },
+                  { id: "EVERY_N_SENDERS", label: "2. Pause after N Senders" },
+                  { id: "EVERY_SINGLE_SENDER", label: "3. Pause Every Sender" },
                 ].map((item) => {
                   const isSelected = currentRotation === item.id;
                   return (
@@ -307,15 +289,33 @@ export default function CampaignForm(props: CampaignFormProps) {
                   );
                 })}
               </div>
+
+              {/* Option 2: EVERY_N_SENDERS के लिए डायनामिक इनपुट */}
+              {currentRotation === "EVERY_N_SENDERS" && (
+                <div className="mt-3 p-3 bg-[#050814] border border-blue-900/60 rounded-xl flex items-center justify-between">
+                  <label className="text-[11px] font-mono text-blue-300">
+                    Pause after how many senders complete their lot?
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      value={props.pauseAfterNSenders || 1}
+                      onChange={(e) => props.setPauseAfterNSenders(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      className="w-16 bg-[#0b132b] border border-blue-800 rounded-lg px-2.5 py-1 text-xs text-white font-mono text-center focus:outline-none focus:border-blue-400"
+                    />
+                    <span className="text-[10px] font-mono text-slate-400">Senders</span>
+                  </div>
+                </div>
+              )}
             </div>
 
           </div>
 
-          {/* Subject Line Rotation Box */}
           <div className="bg-[#0b132b]/90 border border-blue-900/50 hover:border-blue-500/40 transition-all p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-[0_8px_30px_rgb(0,0,0,0.4)] backdrop-blur-md">
             <div className="flex items-center justify-between pb-2 border-b border-blue-950/70">
               <span className="text-xs font-mono text-blue-200 font-bold flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-rose-400"></span> Subject Line Rotation (No-Repeat Random / Lot Guard)
+                <span className="w-2 h-2 rounded-full bg-rose-400"></span> Subject Line Rotation
               </span>
               <span className="text-[11px] font-mono text-slate-400 font-semibold">
                 {props.subjectList.length} / 5 Slots
@@ -358,14 +358,12 @@ export default function CampaignForm(props: CampaignFormProps) {
             )}
           </div>
 
-          {/* Email Body Template Box (with Multi-Template Tabs) */}
           <div className="bg-[#0b132b]/90 border border-blue-900/50 hover:border-blue-500/40 transition-all p-4 sm:p-5 rounded-2xl space-y-2.5 shadow-[0_8px_30px_rgb(0,0,0,0.4)] backdrop-blur-md">
             <div className="flex items-center justify-between pb-2 border-b border-blue-950/70">
               <div className="flex items-center gap-2">
                 <span className="text-xs font-mono text-blue-200 font-bold">
                   Email Body Template (Live Editable)
                 </span>
-                {/* Tabs */}
                 <div className="flex items-center gap-1.5 ml-2">
                   {currentTemplates.map((_, idx) => (
                     <button
@@ -422,12 +420,11 @@ export default function CampaignForm(props: CampaignFormProps) {
                   : props.setTemplate(e.target.value)
               }
               placeholder="Type your outreach message here... Supports Spintax {Hi|Hello|Hey}"
-              className="w-full bg-[#050814] border border-blue-950 rounded-xl p-3 text-xs text-blue-100 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-sans leading-relaxed no-scrollbar resize-none shadow-inner transition"
+              className="w-full bg-[#050814] border border-blue-950 rounded-xl p-3 text-xs text-blue-100 placeholder:text-slate-600 focus:outline-none focus:border-blue-500 font-sans leading-relaxed no-scrollbar resize-none shadow-inner transition"
               required
             />
           </div>
 
-          {/* Custom Signature & Signoff Details */}
           <div className="bg-[#0b132b]/90 border border-blue-900/50 hover:border-blue-500/40 transition-all p-4 rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.4)] backdrop-blur-md">
             <label className="text-[11px] font-mono text-slate-300 block mb-1 font-medium">
               Custom Signature &amp; Signoff Details
@@ -441,7 +438,6 @@ export default function CampaignForm(props: CampaignFormProps) {
             />
           </div>
 
-          {/* 🚀 Full-Width Cyan/Blue Gradient Launch Button */}
           <button
             type="submit"
             disabled={props.loading}
