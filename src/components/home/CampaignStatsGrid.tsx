@@ -3,18 +3,18 @@ import React, { RefObject } from "react";
 import { FailedEmailItem } from "@/types/vault";
 
 interface CampaignStatsGridProps {
-  totalAccountsCount: number;
-  sendersUsedRounds: number;
-  currentSenderIndex: number;
-  remainingAccountsInQueue: number;
-  initialTotalCount: number;
-  processedCount: number;
-  successCount: number;
-  failedLeadsList: FailedEmailItem[];
-  domProcessedCountRef: RefObject<HTMLSpanElement | null>;
-  domDeliveredCountRef: RefObject<HTMLSpanElement | null>;
-  domFailedCountRef: RefObject<HTMLSpanElement | null>;
-  onShowFailedModal: () => void;
+  totalAccountsCount?: number;
+  sendersUsedRounds?: number;
+  currentSenderIndex?: number;
+  remainingAccountsInQueue?: number;
+  initialTotalCount?: number;
+  processedCount?: number;
+  successCount?: number;
+  failedLeadsList?: FailedEmailItem[];
+  domProcessedCountRef?: RefObject<HTMLSpanElement | null>;
+  domDeliveredCountRef?: RefObject<HTMLSpanElement | null>;
+  domFailedCountRef?: RefObject<HTMLSpanElement | null>;
+  onShowFailedModal?: () => void;
 }
 
 export default function CampaignStatsGrid({
@@ -48,7 +48,7 @@ export default function CampaignStatsGrid({
       <div className="bg-slate-950/80 p-2.5 rounded-xl border border-emerald-500/20 text-center">
         <span className="text-[9px] text-emerald-400 uppercase font-black block">Current Turn</span>
         <p className="text-base font-black text-emerald-400 font-mono">
-          #{totalAccountsCount > 0 ? (currentSenderIndex % totalAccountsCount) + 1 : 0}
+          #{totalAccountsCount > 0 ? (currentSenderIndex % totalAccountsCount) + 1 : 1}
         </p>
       </div>
 
@@ -77,7 +77,7 @@ export default function CampaignStatsGrid({
       </div>
 
       <div 
-        onClick={() => currentFailedCount > 0 && onShowFailedModal()}
+        onClick={() => currentFailedCount > 0 && onShowFailedModal && onShowFailedModal()}
         className={`p-2.5 rounded-xl border text-center transition ${
           currentFailedCount > 0 
             ? "bg-rose-950/40 border-rose-500/40 cursor-pointer hover:border-rose-400 animate-pulse" 

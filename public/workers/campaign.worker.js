@@ -17,17 +17,17 @@ let accountAgeMode = "NEW";
 let minDelayMsConfig = 3500;
 let maxDelayMsConfig = 6500;
 
-// Wave & Template Rotation Trackers
-let currentWaveIndex = 0;
-let lastWaveTemplate = "";
-let lastWaveSubject = "";
-let currentWaveSubject = "";
-let currentWaveTemplate = "";
+// Subject & Template Storage
 let subjectList = [];
 let templateList = [];
 let defaultTemplate = "";
 
-// 📊 Campaign Stats Trackers (Directly mapped to CampignStatsGrid props & refs)
+// 🎯 Two-Phase Rotation Trackers (Sequential -> Random)
+let currentRoundSubject = "";
+let currentRoundTemplate = "";
+let sendersUsedRoundsCount = 0; // 0 = Round 1, 1 = Round 2, 2 = Round 3...
+
+// 📊 Header & Stats Tracking (Zero undefined guarantee)
 let globalProcessedCount = 0;
 let globalSuccessCount = 0;
 let globalFailedCount = 0;
@@ -40,9 +40,7 @@ let senderSentCount = {};
 let senderProcessedTimes = {};
 let completedSendersCount = 0;
 let currentSenderIndex = 0;
-let sendersUsedRoundsCount = 0;
 
-// Sender Cooldown Tracker (24 Hours)
 let senderCooldownMap = {};
 const COOLDOWN_HOURS = 24;
 
@@ -71,45 +69,153 @@ function recordDiagnosticCode(code) {
   else diagnosticTelemetry.other++;
 }
 
-function advanceWaveRoundIfNeeded(isNewRoundStarting) {
-  const cleanSubs = (subjectList || []).map((s) => s.trim()).filter((s) => s.length > 0);
+// 🎯 2-फेज़ लॉजिक (1-1, 2-2, 3-3, फिर Non-Repeating Random)
+function determineComboForRound(roundIndex) {
+  const cleanSubs = (subjectList || [])
+    .map((s) => (s || "").trim())
+    .filter((s) => s.length > 0);
+
   const cleanTemps = (Array.isArray(templateList) && templateList.length > 0 ? templateList : [defaultTemplate || ""])
     .map((t) => (t || "").trim())
     .filter((t) => t.length > 0);
 
-  if (!currentWaveSubject || !currentWaveTemplate) {
-    currentWaveSubject = cleanSubs.length > 0 ? cleanSubs[0] : "Quick check-in regarding partnership";
-    currentWaveTemplate = cleanTemps.length > 0 ? cleanTemps[0] : (defaultTemplate || "Hi there, hope you are well.");
-    lastWaveSubject = currentWaveSubject;
-    lastWaveTemplate = currentWaveTemplate;
-    return;
+  const totalSubs = cleanSubs.length || 1;
+  const totalTemps = cleanTemps.length || 1;
+  const maxInitialPairs = Math.max(totalSubs, totalTemps);
+
+  let nextSub = "";
+  let nextTemp = "";
+
+  // 🔹 फ़ेज़ 1: सीक्वेंशियल राउंड्स
+  if (roundIndex < maxInitialPairs) {
+    nextSub = cleanSubs[roundIndex % totalSubs] || cleanSubs[0] || "Quick check-in regarding partnership";
+    nextTemp = cleanTemps[roundIndex % totalTemps] || cleanTemps[0] || (defaultTemplate || "Hi there, hope you are well.");
+  } 
+  // 🔹 फ़ेज़ 2: नॉन-रिपीटिंग रैंडम
+  else {
+    if (cleanSubs.length > 1) {
+      const poolSubs = cleanSubs.filter((s) => s !== currentRoundSubject);
+      const activePool = poolSubs.length > 0 ? poolSubs : cleanSubs;
+      nextSub = activePool[Math.floor(Math.random() * activePool.length)];
+    } else {
+      nextSub = cleanSubs[0] || "Quick check-in regarding partnership";
+    }
+
+    if (cleanTemps.length > 1) {
+      const poolTemps = cleanTemps.filter((t) => t !== currentRoundTemplate);
+      const activePoolT = poolTemps.length > 0 ? poolTemps : cleanTemps;
+      nextTemp = activePoolT[Math.floor(Math.random() * activePoolT.length)];
+    } else {
+      nextTemp = cleanTemps[0] || defaultTemplate || "Hi there, hope you are well.";
+    }
   }
 
-  if (isNewRoundStarting) {
-    currentWaveIndex++;
-    if (cleanSubs.length > 1) {
-      const availableSubs = cleanSubs.filter((s) => s !== lastWaveSubject);
-      currentWaveSubject = availableSubs.length > 0 ? availableSubs[0] : cleanSubs[0];
-      lastWaveSubject = currentWaveSubject;
+  currentRoundSubject = nextSub;
+  currentRoundTemplate = nextTemp;
+
+  self.postMessage({
+    type: "LIVE_STATUS",
+    payload: {
+      text: `🔄 [Round ${roundIndex + 1}] Active: Sub: "${currentRoundSubject.substring(0, 25)}..." | Template Rotated`,
+      currentSubject: currentRoundSubject,
+      currentTemplate: currentRoundTemplate,
+    },
+  });
+}
+
+// 🔄 स्टॉप/पॉज़ के बाद अगर कुछ बदला है तो उसे तुरंत सिंक करना
+function syncContentIfChanged(incomingSubs, incomingTemps, incomingDefTemp) {
+  let changed = false;
+
+  if (Array.isArray(incomingSubs)) {
+    const cleanNewSubs = incomingSubs.map(s => (s || "").trim()).filter(Boolean);
+    if (JSON.stringify(cleanNewSubs) !== JSON.stringify(subjectList)) {
+      subjectList = cleanNewSubs;
+      changed = true;
     }
-    if (cleanTemps.length > 1) {
-      const availableTemps = cleanTemps.filter((t) => t !== lastWaveTemplate);
-      currentWaveTemplate = availableTemps.length > 0 ? availableTemps[0] : cleanTemps[0];
-      lastWaveTemplate = currentWaveTemplate;
+  }
+
+  if (Array.isArray(incomingTemps)) {
+    const cleanNewTemps = incomingTemps.map(t => (t || "").trim()).filter(Boolean);
+    if (JSON.stringify(cleanNewTemps) !== JSON.stringify(templateList)) {
+      templateList = cleanNewTemps;
+      changed = true;
     }
+  }
+
+  if (incomingDefTemp && incomingDefTemp !== defaultTemplate) {
+    defaultTemplate = incomingDefTemp;
+    changed = true;
+  }
+
+  if (changed) {
+    determineComboForRound(sendersUsedRoundsCount);
     self.postMessage({
       type: "LIVE_STATUS",
-      payload: { text: `[Wave Round ${currentWaveIndex + 1}] Subject and template rotated.` },
+      payload: { text: "⚡ [Content Synced] New subjects/templates applied on resume!" },
     });
   }
+}
+
+// UI के सभी काउंटर्स के लिए फुल पेलोड
+function buildStatsPayload(activeSender, sendSuccess, coldLead, reportError) {
+  return {
+    processed: globalProcessedCount,
+    processedCount: globalProcessedCount,
+    totalProcessed: globalProcessedCount,
+    instantProcessed: globalProcessedCount,
+
+    delivered: globalSuccessCount,
+    successCount: globalSuccessCount,
+    deliveredCount: globalSuccessCount,
+    totalSuccess: globalSuccessCount,
+    instantSuccess: globalSuccessCount,
+
+    failed: globalFailedCount,
+    failedCount: globalFailedCount,
+    totalFailed: globalFailedCount,
+    failedLeadsList: failedLeadsArray,
+    newlyFailed: !sendSuccess && coldLead ? [{
+      email: coldLead,
+      reason: reportError || "Delivery Failed",
+      senderUsed: activeSender ? activeSender.email : "",
+      time: new Date().toLocaleTimeString(),
+    }] : [],
+
+    sendersUsedRounds: sendersUsedRoundsCount,
+    turnsDone: sendersUsedRoundsCount,
+    currentSenderIndex: currentSenderIndex,
+    currentTurn: currentSenderIndex + 1,
+    remainingAccountsInQueue: sendersList.length,
+    totalAccountsCount: sendersList.length,
+
+    activeSenderEmail: activeSender ? activeSender.email : "",
+    activeSenderName: activeSender ? (activeSender.senderName || "Sender") : "",
+    senderEmail: activeSender ? activeSender.email : "",
+    senderName: activeSender ? (activeSender.senderName || "Sender") : "",
+
+    currentSubject: currentRoundSubject,
+    currentTemplate: currentRoundTemplate,
+
+    remainingQueue: currentQueue,
+    remainingQueueCount: currentQueue.length,
+    diagnosticStats: diagnosticTelemetry,
+    senderMetrics: senderHealthMap,
+    totalWarmupCount: 0,
+    totalRescuedCount: 0,
+  };
 }
 
 // ========================================================
 // 🚀 MAIN CAMPAIGN EXECUTION LOOP
 // ========================================================
 async function runCampaignWorkflow() {
-  const isRoundRobin = rotationMode === "CONTINUOUS" || rotationMode === "EVERY_N_SENDERS";
-  advanceWaveRoundIfNeeded(false);
+  const modeClean = (rotationMode || "").toUpperCase();
+  const isRoundRobin = modeClean === "CONTINUOUS" || modeClean === "EVERY_N_SENDERS" || modeClean === "ROUND_ROBIN" || modeClean.includes("ROBIN") || modeClean === "";
+
+  if (!currentRoundSubject || !currentRoundTemplate) {
+    determineComboForRound(sendersUsedRoundsCount);
+  }
 
   while (isRunning && !isStopRequested && currentQueue.length > 0 && sendersList.length > 0) {
     if (isPaused) {
@@ -117,17 +223,35 @@ async function runCampaignWorkflow() {
       continue;
     }
 
-    // 🎯 जब पूरी टीम का 1 राउंड पूरा हो जाए
-    if (isRoundRobin && currentSenderIndex >= sendersList.length) {
-      currentSenderIndex = 0;
-      sendersUsedRoundsCount++;
-      advanceWaveRoundIfNeeded(true);
+    // 🛑 अगर सेंडर खत्म हो गए तो रुक जाओ और UI को अलर्ट करो
+    if (sendersList.length === 0) {
+      isPaused = true;
+      isRunning = false;
+      self.postMessage({
+        type: "SENDERS_EXHAUSTED",
+        message: "⚠️ All senders completed their lots! Add more senders to resume.",
+        payload: buildStatsPayload(null, false, null, null),
+      });
+      break;
     }
 
-    if (sendersList.length === 0 || currentQueue.length === 0) break;
+    // 🛑 अगर लीड्स खत्म हो गईं तो रुक जाओ और UI को अलर्ट करो
+    if (currentQueue.length === 0) {
+      isPaused = true;
+      isRunning = false;
+      self.postMessage({
+        type: "QUEUE_EXHAUSTED",
+        message: "⚠️ Target leads finished! Add more leads to continue.",
+        payload: buildStatsPayload(null, false, null, null),
+      });
+      break;
+    }
 
-    // EVERY_SINGLE_SENDER में वही सेंडर लगातार चलेगा
     if (!isRoundRobin) {
+      currentSenderIndex = 0;
+    }
+
+    if (currentSenderIndex >= sendersList.length) {
       currentSenderIndex = 0;
     }
 
@@ -135,7 +259,7 @@ async function runCampaignWorkflow() {
     const rawSenderEmail = activeSender.email.toLowerCase().trim();
     const currentSent = senderSentCount[rawSenderEmail] || 0;
 
-    // 🛑 प्री-सेंड चेक: टारगेट पूरा तो सेंडर बाहर
+    // प्री-सेंड कोटा चेक
     if (currentSent >= targetLotSize) {
       completedSendersCount++;
       const exitTimestamp = Date.now();
@@ -156,7 +280,13 @@ async function runCampaignWorkflow() {
       });
 
       sendersList.splice(currentSenderIndex, 1);
-      if (currentSenderIndex >= sendersList.length) currentSenderIndex = 0;
+      if (currentSenderIndex >= sendersList.length) {
+        currentSenderIndex = 0;
+        if (sendersList.length > 0) {
+          sendersUsedRoundsCount++;
+          determineComboForRound(sendersUsedRoundsCount);
+        }
+      }
       continue;
     }
 
@@ -165,7 +295,12 @@ async function runCampaignWorkflow() {
     self.postMessage({
       type: "LIVE_STATUS",
       payload: {
-        text: `[${rotationMode}] [Sender ${currentSenderIndex + 1}/${sendersList.length}: ${rawSenderEmail}] (${currentSent + 1}/${targetLotSize}) -> ${coldLead}`,
+        text: `🚀 [Round ${sendersUsedRoundsCount + 1}] [Turn ${currentSenderIndex + 1}/${sendersList.length}: ${activeSender.senderName || rawSenderEmail}] [Sub: "${currentRoundSubject.substring(0, 25)}..."] -> ${coldLead}`,
+        activeSenderEmail: rawSenderEmail,
+        activeSenderName: activeSender.senderName || "Sender",
+        currentSenderIndex: currentSenderIndex,
+        currentTurn: currentSenderIndex + 1,
+        turnsDone: sendersUsedRoundsCount,
       },
     });
 
@@ -181,8 +316,8 @@ async function runCampaignWorkflow() {
           senderEmail: rawSenderEmail,
           appPassword: activeSender.appPassword.replace(/\s+/g, ""),
           recipients: [coldLead],
-          subject: currentWaveSubject,
-          template: currentWaveTemplate.trim(),
+          subject: currentRoundSubject,
+          template: currentRoundTemplate.trim(),
           customSignoffName: customSignoffName.trim(),
           accountAgeMode,
           machineId,
@@ -196,7 +331,7 @@ async function runCampaignWorkflow() {
         currentQueue.shift();
         recordSenderMetric(rawSenderEmail, "BOUNCE");
         recordDiagnosticCode(data.report?.[0]?.bounceCode || 550);
-        reportError = data.report?.[0]?.error || "Address not found (550/501/553)";
+        reportError = data.report?.[0]?.error || "Recipient address not found (550/501/553)";
       } else {
         currentQueue.shift();
         const report = data.report?.[0] || {};
@@ -211,7 +346,6 @@ async function runCampaignWorkflow() {
         }
       }
 
-      // ग्लोबल काउंटर्स अपडेट
       globalProcessedCount++;
       if (sendSuccess) {
         globalSuccessCount++;
@@ -225,31 +359,9 @@ async function runCampaignWorkflow() {
         });
       }
 
-      // 🔥 UI और CampignStatsGrid के लिए सभी जरूरी फील्ड्स का पेलोड
       self.postMessage({
         type: "BATCH_CHUNK_DONE",
-        payload: {
-          // CampignStatsGrid Direct Props & State Keys
-          processedCount: globalProcessedCount,
-          successCount: globalSuccessCount,
-          processed: globalProcessedCount,
-          delivered: globalSuccessCount,
-          failed: globalFailedCount,
-          failedLeadsList: failedLeadsArray,
-          currentSenderIndex,
-          sendersUsedRounds: sendersUsedRoundsCount,
-          remainingAccountsInQueue: sendersList.length,
-
-          // Compatibility Keys
-          chunkProcessed: 1,
-          chunkSuccess: sendSuccess ? 1 : 0,
-          newlyFailed: !sendSuccess ? [{ email: coldLead, reason: reportError, senderUsed: rawSenderEmail, time: new Date().toLocaleTimeString() }] : [],
-          remainingQueue: currentQueue,
-          diagnosticStats: diagnosticTelemetry,
-          senderMetrics: senderHealthMap,
-          totalWarmupCount: 0,
-          totalRescuedCount: 0,
-        },
+        payload: buildStatsPayload(activeSender, sendSuccess, coldLead, reportError),
       });
 
       const updatedCount = currentSent + 1;
@@ -280,16 +392,29 @@ async function runCampaignWorkflow() {
         });
 
         sendersList.splice(currentSenderIndex, 1);
-        if (currentSenderIndex >= sendersList.length) currentSenderIndex = 0;
+        if (currentSenderIndex >= sendersList.length) {
+          currentSenderIndex = 0;
+          if (sendersList.length > 0) {
+            sendersUsedRoundsCount++;
+            determineComboForRound(sendersUsedRoundsCount);
+          }
+        }
       } else {
-        // सख्त 1-बाय-1: राउंड-रॉबिन में हर मेल के बाद इंडेक्स अनिवार्य रूप से आगे बढ़ेगा
+        // 🔥 सख्त 1-बाय-1 राउंड-रॉबिन
         if (isRoundRobin) {
-          currentSenderIndex = (currentSenderIndex + 1) % (sendersList.length || 1);
+          currentSenderIndex++;
+
+          // 🎯 जैसे ही आखिरी सेंडर का मेल गया -> राउंड + 1
+          if (currentSenderIndex >= sendersList.length) {
+            currentSenderIndex = 0;
+            sendersUsedRoundsCount++;
+            determineComboForRound(sendersUsedRoundsCount);
+          }
         }
       }
 
-      // Option 3: EVERY_SINGLE_SENDER (लॉट पूरा होते ही पॉज़)
-      if (rotationMode === "EVERY_SINGLE_SENDER" && senderJustCompletedLot) {
+      // Option 3: EVERY_SINGLE_SENDER
+      if (modeClean === "EVERY_SINGLE_SENDER" && senderJustCompletedLot) {
         isPaused = true;
         isRunning = false;
         self.postMessage({
@@ -299,8 +424,8 @@ async function runCampaignWorkflow() {
         return;
       }
 
-      // Option 2: EVERY_N_SENDERS (N सेंडर्स का लॉट पूरा होते ही पॉज़)
-      if (rotationMode === "EVERY_N_SENDERS" && senderJustCompletedLot) {
+      // Option 2: EVERY_N_SENDERS
+      if (modeClean === "EVERY_N_SENDERS" && senderJustCompletedLot) {
         const targetN = Math.max(1, pauseAfterNSenders);
         if (completedSendersCount > 0 && completedSendersCount % targetN === 0) {
           isPaused = true;
@@ -323,25 +448,20 @@ async function runCampaignWorkflow() {
         time: new Date().toLocaleTimeString(),
       });
       recordSenderMetric(rawSenderEmail, "BOUNCE");
+      
       if (isRoundRobin) {
-        currentSenderIndex = (currentSenderIndex + 1) % (sendersList.length || 1);
+        currentSenderIndex++;
+        if (currentSenderIndex >= sendersList.length) {
+          currentSenderIndex = 0;
+          sendersUsedRoundsCount++;
+          determineComboForRound(sendersUsedRoundsCount);
+        }
       }
     }
 
     self.postMessage({
       type: "TELEMETRY_UPDATE",
-      payload: { 
-        processedCount: globalProcessedCount,
-        successCount: globalSuccessCount,
-        processed: globalProcessedCount,
-        delivered: globalSuccessCount,
-        failed: globalFailedCount,
-        failedLeadsList: failedLeadsArray,
-        diagnosticStats: diagnosticTelemetry, 
-        senderMetrics: senderHealthMap, 
-        totalWarmupCount: 0, 
-        totalRescuedCount: 0 
-      },
+      payload: buildStatsPayload(activeSender, false, null, null),
     });
 
     await sleepRandomDelay(minDelayMsConfig, maxDelayMsConfig);
@@ -353,17 +473,7 @@ async function runCampaignWorkflow() {
     payload: {
       isQueueEmpty: currentQueue.length === 0,
       areSendersExhausted: sendersList.length === 0,
-      processedCount: globalProcessedCount,
-      successCount: globalSuccessCount,
-      processed: globalProcessedCount,
-      delivered: globalSuccessCount,
-      failed: globalFailedCount,
-      failedLeadsList: failedLeadsArray,
-      senderProcessedTimes,
-      diagnosticStats: diagnosticTelemetry,
-      senderMetrics: senderHealthMap,
-      totalWarmupCount: 0,
-      totalRescuedCount: 0,
+      ...buildStatsPayload(null, false, null, null),
     },
   });
 }
@@ -374,12 +484,21 @@ async function runCampaignWorkflow() {
 self.onmessage = async (e) => {
   const { action, payload } = e.data;
 
+  // 1. लाइव अपडेट (चलते-चलते सब्जेक्ट/टेम्पलेट बदलना)
+  if (action === "UPDATE_CONTENT") {
+    if (payload) {
+      syncContentIfChanged(payload.subjectList, payload.templateList, payload.template);
+    }
+    return;
+  }
+
+  // 2. लीड्स जोड़ना (APPEND_LEADS)
   if (action === "APPEND_LEADS") {
     if (Array.isArray(payload.newLeads) && payload.newLeads.length > 0) {
       currentQueue.push(...payload.newLeads);
       self.postMessage({
         type: "LIVE_STATUS",
-        payload: { text: `[Queue Appended] +${payload.newLeads.length} leads added. Total in queue: ${currentQueue.length}` },
+        payload: { text: `[Queue Appended] +${payload.newLeads.length} leads added. Total: ${currentQueue.length}` },
       });
 
       if (!isRunning && sendersList.length > 0) {
@@ -392,6 +511,33 @@ self.onmessage = async (e) => {
     return;
   }
 
+  // 3. नए सेंडर्स जोड़ना (APPEND_SENDERS - सेंडर खत्म होने पर नया माल झोंकना)
+  if (action === "APPEND_SENDERS") {
+    if (Array.isArray(payload.newSendersList) && payload.newSendersList.length > 0) {
+      payload.newSendersList.forEach((s) => {
+        const email = s.email.toLowerCase().trim();
+        if (!sendersList.some(existing => existing.email.toLowerCase().trim() === email)) {
+          sendersList.push(s);
+          senderSentCount[email] = 0;
+        }
+      });
+
+      self.postMessage({
+        type: "LIVE_STATUS",
+        payload: { text: `[Senders Added] +${payload.newSendersList.length} new senders added. Total: ${sendersList.length}` },
+      });
+
+      if (!isRunning && currentQueue.length > 0 && sendersList.length > 0) {
+        isRunning = true;
+        isPaused = false;
+        isStopRequested = false;
+        runCampaignWorkflow();
+      }
+    }
+    return;
+  }
+
+  // 4. सेंडर्स की पूरी लिस्ट बदलना (SWAP_SENDERS)
   if (action === "SWAP_SENDERS") {
     const { newSendersList, newTargetLotSize } = payload;
     if (Array.isArray(newSendersList) && newSendersList.length > 0) {
@@ -405,9 +551,7 @@ self.onmessage = async (e) => {
 
       self.postMessage({
         type: "LIVE_STATUS",
-        payload: {
-          text: `[Tier Swapped] Loaded ${sendersList.length} new senders with target lot ${targetLotSize}.`,
-        },
+        payload: { text: `[Tier Swapped] Loaded ${sendersList.length} senders.` },
       });
 
       if (!isRunning && currentQueue.length > 0 && sendersList.length > 0) {
@@ -420,17 +564,30 @@ self.onmessage = async (e) => {
     return;
   }
 
+  // 🚀 5. START या RESUME (यहाँ स्टॉप के बाद का नया डेटा ऑटो-चेक होगा)
   if (action === "START" || action === "RESUME") {
     isRunning = true;
     isPaused = false;
     isStopRequested = false;
+
+    // 🔥 अगर स्टॉप के दौरान सब्जेक्ट, टेम्पलेट या सेंडर बदले हैं तो तुरंत री-सिंक
+    if (payload) {
+      syncContentIfChanged(payload.subjectList, payload.templateList, payload.template);
+
+      // अगर रिज़्यूम पर नए सेंडर या लीड्स भेजी गई हैं तो सिंक करें
+      if (Array.isArray(payload.sendersList) && payload.sendersList.length > 0) {
+        sendersList = [...payload.sendersList];
+      }
+      if (Array.isArray(payload.currentQueue) && payload.currentQueue.length > 0) {
+        currentQueue = [...payload.currentQueue];
+      }
+    }
 
     if (action === "START") {
       currentQueue = [...(payload.currentQueue || [])];
       sendersList = [...(payload.sendersList || [])];
       targetLotSize = payload.targetLotSize || 10;
       
-      // UI rotationMode के साथ 100% सही मैपिंग
       rotationMode = payload.rotationMode || "CONTINUOUS";
       pauseAfterNSenders = payload.pauseAfterNSenders || 1;
 
@@ -443,15 +600,12 @@ self.onmessage = async (e) => {
       minDelayMsConfig = payload.modeConfig?.minDelay || 3500;
       maxDelayMsConfig = payload.modeConfig?.maxDelay || 6500;
 
-      subjectList = payload.subjectList || [];
-      templateList = payload.templateList || [];
+      subjectList = Array.isArray(payload.subjectList) ? payload.subjectList.filter(s => (s || "").trim().length > 0) : [];
+      templateList = Array.isArray(payload.templateList) ? payload.templateList.filter(t => (t || "").trim().length > 0) : [];
       defaultTemplate = payload.template || "";
 
-      currentWaveIndex = 0;
-      lastWaveSubject = "";
-      lastWaveTemplate = "";
-      currentWaveSubject = "";
-      currentWaveTemplate = "";
+      currentRoundSubject = "";
+      currentRoundTemplate = "";
 
       globalProcessedCount = 0;
       globalSuccessCount = 0;
@@ -498,6 +652,8 @@ self.onmessage = async (e) => {
     globalSuccessCount = 0;
     globalFailedCount = 0;
     failedLeadsArray = [];
+    currentRoundSubject = "";
+    currentRoundTemplate = "";
 
     self.postMessage({ type: "LOG", payload: { text: "Worker reset completed." } });
   }
