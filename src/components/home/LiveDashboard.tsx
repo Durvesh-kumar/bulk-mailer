@@ -1,3 +1,6 @@
+// src/components/home/LiveDashboard.tsx
+"use client";
+
 import React from "react";
 import { ProfileTier, TIER_META } from "@/types/vault";
 import { InputField } from "@/components/ui/InputField";
@@ -13,6 +16,8 @@ interface LiveDashboardProps {
   senderEmail: string;
   setSenderEmail: (v: string) => void;
   sendersUsedRounds: number;
+  currentSenderIndex?: number;
+  totalAccountsCount?: number;
   handleStopCampaign: () => void;
   handleFullReset: () => void;
   isVaultLoaded: boolean;
@@ -45,6 +50,8 @@ export default function LiveDashboard({
   senderEmail,
   setSenderEmail,
   sendersUsedRounds,
+  currentSenderIndex = 0,
+  totalAccountsCount = 0,
   handleStopCampaign,
   handleFullReset,
   isVaultLoaded,
@@ -65,9 +72,11 @@ export default function LiveDashboard({
   setTemplate,
   currentBatchTarget,
 }: LiveDashboardProps) {
+  const displayTurn = totalAccountsCount > 0 ? (currentSenderIndex % totalAccountsCount) + 1 : 1;
+
   return (
     <div className="bg-slate-900/90 border border-slate-800 p-5 rounded-2xl space-y-4 shadow-xl">
-      {/* ⚡ DYNAMIC ACTION BAR */}
+      {/* ⚡ DYNAMIC QUICK ACTIONS BAR */}
       <div className="bg-slate-950 border border-indigo-500/30 p-3.5 rounded-xl flex flex-wrap items-center justify-between gap-3 shadow-inner">
         <div className="flex items-center gap-2">
           <span className="text-xs font-bold text-indigo-300">⚡ Dynamic Quick Actions:</span>
@@ -108,8 +117,9 @@ export default function LiveDashboard({
                 <span className={`w-2.5 h-2.5 rounded-full ${loading ? "bg-emerald-400 animate-ping" : "bg-amber-400"}`} />
                 {loading ? "🚀 Auto-Dispatching Active..." : "⏸️ Campaign Paused - Ready to Resume"}
               </h3>
-              <p className="text-[10px] text-slate-400 mt-0.5 font-mono">
-                Active Sender: <span className="text-indigo-300 font-bold">{senderEmail}</span> (Turn #{sendersUsedRounds + 1})
+              {/* 🔥 लाइव सेंडर और टर्न अब हर मेल पर बदलेंगे */}
+              <p className="text-[11px] text-slate-300 mt-1 font-mono">
+                Active Sender: <span className="text-emerald-400 font-bold">{senderEmail || "Loading..."}</span> ({senderName || "Sender"}) • Round: <span className="text-blue-400 font-bold">#{sendersUsedRounds + 1}</span> • Turn: <span className="text-amber-400 font-bold">#{displayTurn}</span>
               </p>
             </div>
 
@@ -139,23 +149,23 @@ export default function LiveDashboard({
 
           <div className={`grid grid-cols-1 ${!isVaultLoaded ? "sm:grid-cols-3" : "sm:grid-cols-2"} gap-3`}>
             <InputField
-              label="Active Sender Gmail"
+              label="Active Sender Gmail (Live)"
               type="email"
               required
               disabled={loading}
               value={senderEmail}
               onChange={(e) => setSenderEmail(e.target.value)}
-              className="font-mono bg-slate-900 border-slate-700 text-xs"
+              className="font-mono bg-slate-900 border-slate-700 text-xs text-emerald-300 font-bold"
             />
 
             <InputField
-              label="Sender Display Name"
+              label="Sender Display Name (Live)"
               type="text"
               required
               disabled={loading}
               value={senderName}
               onChange={(e) => setSenderName(e.target.value)}
-              className="bg-slate-900 border-slate-700 text-xs"
+              className="bg-slate-900 border-slate-700 text-xs text-slate-200"
             />
 
             {!isVaultLoaded && (
@@ -187,7 +197,7 @@ export default function LiveDashboard({
           <div className="space-y-2 pt-1">
             <div className="flex justify-between items-center">
               <label className="text-[10px] text-slate-300 font-bold flex items-center gap-1">
-                <span>✏️</span> Live Subject Lines (Rotates with No-Repeat between 1 to 5)
+                <span>✏️</span> Live Subject Lines (Rotates Round-by-Round)
               </label>
               <span className="text-[9px] font-mono text-slate-500">
                 {subjectList.length} Active Slots

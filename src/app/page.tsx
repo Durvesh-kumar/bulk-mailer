@@ -50,11 +50,15 @@ export default function Home() {
   const [selectedTier, setSelectedTier] = useState<ProfileTier>("CURRENT");
   const [isVaultLoaded, setIsVaultLoaded] = useState(false);
 
-  // Active Sender State
+  // Active Sender State (UI Form)
   const [senderName, setSenderName] = useState("");
   const [senderEmail, setSenderEmail] = useState("");
   const [appPassword, setAppPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+
+  // 🚀 Live Dispatching Active Sender State (Directly driven by Worker on every mail)
+  const [liveActiveSenderEmail, setLiveActiveSenderEmail] = useState("");
+  const [liveActiveSenderName, setLiveActiveSenderName] = useState("");
 
   const [inMemorySenders, setInMemorySenders] = useState<SmtpAccount[]>([]);
   const [peerReceivers, setPeerReceivers] = useState<Array<{ email: string; senderName?: string; appPassword?: string }>>([]);
@@ -132,7 +136,6 @@ export default function Home() {
   const workerRef = useRef<Worker | null>(null);
   const dnsWorkerRef = useRef<Worker | null>(null);
 
-  // केवल उन्हीं सेंडर्स का टाइमस्टैम्प अपडेट करें जिनका मेल वास्तव में प्रोसेस हुआ
   const syncSenderTimestamps = async (usedTimes: Record<string, string>) => {
     if (!usedTimes || Object.keys(usedTimes).length === 0 || !machineId) return;
     try {
@@ -206,6 +209,19 @@ export default function Home() {
     return mins > 0 ? `~${mins}m ${secs}s` : `~${secs}s`;
   }, [pendingEmails.length]);
 
+  // 🔄 जब भी कैंपेन चलते समय सब्जेक्ट या टेम्पलेट बदले जाएँ, वर्कर को तुरंत सिंक करें
+  const pushContentUpdateToWorker = (newSubjects?: string[], newTemplates?: string[]) => {
+    if (!workerRef.current) return;
+    workerRef.current.postMessage({
+      action: "UPDATE_CONTENT",
+      payload: {
+        subjectList: newSubjects || subjectList,
+        templateList: newTemplates || templateList,
+        template: (newTemplates && newTemplates[activeTemplateTab]) || templateList[activeTemplateTab] || "",
+      },
+    });
+  };
+
   useEffect(() => {
     workerRef.current = new Worker("/workers/campaign.worker.js");
 
@@ -215,58 +231,79 @@ export default function Home() {
       if (type === "LIVE_STATUS") {
         if (domLiveStatusRef.current) domLiveStatusRef.current.innerText = payload.text;
         else setProgressStatus(payload.text);
+
+        // 🔥 लाइव सेंडर और टर्न को हर मैसेज पर तुरंत स्टेट में सेट करें
+        if (payload.activeSenderEmail) {
+          setLiveActiveSenderEmail(payload.activeSenderEmail);
+        }
+        if (payload.activeSenderName) {
+          setLiveActiveSenderName(payload.activeSenderName);
+        }
+        if (payload.currentSenderIndex !== undefined) {
+          setCurrentSenderIndex(payload.currentSenderIndex);
+        }
+        if (payload.turnsDone !== undefined) {
+          setSendersUsedRounds(payload.turnsDone);
+        }
       }
 
       if (type === "UPDATE_SESSION_TOKEN" && sessionToken) {
         localStorage.setItem(SESSION_TOKEN_KEY, sessionToken);
       }
 
-      if (type === "TELEMETRY_UPDATE") {
-        if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
-        if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
-        if (payload.totalWarmupCount !== undefined) setTotalWarmupCount(payload.totalWarmupCount);
-        if (payload.totalRescuedCount !== undefined) setTotalRescuedCount(payload.totalRescuedCount);
+      if (type === "TELEMETRY_UPDATE" || type === "BATCH_CHUNK_DONE") {
+        const p = payload || {};
+
+        // 🎯 1. चालू सेंडर को लाइव अपडेट करो
+        if (p.activeSenderEmail) setLiveActiveSenderEmail(p.activeSenderEmail);
+        if (p.activeSenderName) setLiveActiveSenderName(p.activeSenderName);
+
+        // 🎯 2. टर्न और राउंड को लाइव अपडेट करो
+        if (p.turnsDone !== undefined) setSendersUsedRounds(p.turnsDone);
+        else if (p.sendersUsedRounds !== undefined) setSendersUsedRounds(p.sendersUsedRounds);
+
+        if (p.currentSenderIndex !== undefined) setCurrentSenderIndex(p.currentSenderIndex);
+
+        // 🎯 3. प्रोसेस्ड, डिलीवर्ड और क्यू
+        const proc = p.processed ?? p.processedCount ?? p.instantProcessed ?? 0;
+        const deliv = p.delivered ?? p.successCount ?? p.instantSuccess ?? 0;
+        const failed = p.failed ?? p.failedCount ?? 0;
+
+        setProcessedCount(proc);
+        setSuccessCount(deliv);
+
+        if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = String(proc);
+        if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = String(deliv);
+        if (domFailedCountRef.current) domFailedCountRef.current.innerText = String(failed);
+
+        if (p.remainingQueue) {
+          setPendingEmails(p.remainingQueue);
+          if (p.remainingQueue.length > 0) {
+            localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(p.remainingQueue));
+          } else {
+            localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
+          }
+          setRawSheetData(p.remainingQueue.join("\n"));
+        }
+
+        if (p.failedLeadsList && Array.isArray(p.failedLeadsList)) {
+          setFailedLeadsList(p.failedLeadsList);
+        }
+
+        if (p.diagnosticStats) setDiagnosticStats(p.diagnosticStats);
+        if (p.senderMetrics) setSenderMetrics(p.senderMetrics);
+        if (p.totalWarmupCount !== undefined) setTotalWarmupCount(p.totalWarmupCount);
+        if (p.totalRescuedCount !== undefined) setTotalRescuedCount(p.totalRescuedCount);
       }
 
-      if (type === "BATCH_CHUNK_DONE") {
-        const updatedRemaining = payload.remainingQueue || [];
-        setProcessedCount(payload.instantProcessed);
-        setSuccessCount(payload.instantSuccess);
-        setPendingEmails(updatedRemaining);
-
-        if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
-        if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
-        if (payload.totalWarmupCount !== undefined) setTotalWarmupCount(payload.totalWarmupCount);
-        if (payload.totalRescuedCount !== undefined) setTotalRescuedCount(payload.totalRescuedCount);
-
-        if (updatedRemaining.length > 0) {
-          localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(updatedRemaining));
-        } else {
-          localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
-        }
-        setRawSheetData(updatedRemaining.join("\n"));
-
-        if (domProcessedCountRef.current) domProcessedCountRef.current.innerText = String(payload.instantProcessed);
-        if (domDeliveredCountRef.current) domDeliveredCountRef.current.innerText = String(payload.instantSuccess);
-
-        if (payload.newlyFailed && payload.newlyFailed.length > 0) {
-          setFailedLeadsList((prev) => {
-            const updated = [...prev, ...payload.newlyFailed];
-            if (domFailedCountRef.current) domFailedCountRef.current.innerText = String(updated.length);
-            return updated;
-          });
-        }
+      if (type === "SENDERS_EXHAUSTED") {
+        setLoading(false);
+        alert(message || "All sender accounts have completed their lot limits! Please load or append more senders.");
       }
 
-      if (type === "ROUND_DONE") {
-        setSendersUsedRounds(payload.updatedRounds);
-        setCurrentSenderIndex(payload.nextSenderIndex);
-        setLastBatchMessage(payload.lastBatchMessage);
-        if (payload.nextSender) {
-          setSenderEmail(payload.nextSender.email);
-          setAppPassword(payload.nextSender.appPassword);
-          setSenderName(payload.nextSender.senderName || "Colleague");
-        }
+      if (type === "QUEUE_EXHAUSTED") {
+        setLoading(false);
+        alert(message || "All leads have been processed! You can append more leads to resume.");
       }
 
       if (type === "PAUSED") {
@@ -284,20 +321,19 @@ export default function Home() {
       if (type === "QUEUE_FINISHED_OR_STOPPED") {
         setLoading(false);
         setProgressStatus("");
-        if (payload.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
-        if (payload.senderMetrics) setSenderMetrics(payload.senderMetrics);
+        if (payload?.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
+        if (payload?.senderMetrics) setSenderMetrics(payload.senderMetrics);
 
-        // केवल प्रयुक्त सेंडर्स का टाइमस्टैम्प अपडेट करें
-        if (payload.senderProcessedTimes) {
+        if (payload?.senderProcessedTimes) {
           syncSenderTimestamps(payload.senderProcessedTimes);
         }
 
-        if (payload.isQueueEmpty) {
+        if (payload?.isQueueEmpty) {
           setIsCampaignStarted(false);
           localStorage.removeItem(PENDING_QUEUE_STORAGE_KEY);
           setRawSheetData("");
           setShowAnalyticsDashboard(true);
-        } else if (payload.areSendersExhausted) {
+        } else if (payload?.areSendersExhausted) {
           alert("All active sender accounts have reached their specified lot limit.");
         }
       }
@@ -322,24 +358,35 @@ export default function Home() {
   }, [setIsSuspended, machineId]);
 
   const handleAddSubjectField = () => {
-    if (subjectList.length < 5) setSubjectList([...subjectList, ""]);
+    if (subjectList.length < 5) {
+      const updated = [...subjectList, ""];
+      setSubjectList(updated);
+      pushContentUpdateToWorker(updated, undefined);
+    }
   };
 
   const handleRemoveSubjectField = (indexToRemove: number) => {
-    if (subjectList.length > 1) setSubjectList(subjectList.filter((_, idx) => idx !== indexToRemove));
+    if (subjectList.length > 1) {
+      const updated = subjectList.filter((_, idx) => idx !== indexToRemove);
+      setSubjectList(updated);
+      pushContentUpdateToWorker(updated, undefined);
+    }
   };
 
   const handleSubjectTextChange = (index: number, val: string) => {
     const updated = [...subjectList];
     updated[index] = val;
     setSubjectList(updated);
+    pushContentUpdateToWorker(updated, undefined);
   };
 
   const handleAddTemplateField = () => {
     if (templateList.length < 3) {
       const nextIndex = templateList.length;
-      setTemplateList([...templateList, ""]);
+      const updated = [...templateList, ""];
+      setTemplateList(updated);
       setActiveTemplateTab(nextIndex);
+      pushContentUpdateToWorker(undefined, updated);
     }
   };
 
@@ -348,6 +395,7 @@ export default function Home() {
       const updated = templateList.filter((_, idx) => idx !== indexToRemove);
       setTemplateList(updated);
       setActiveTemplateTab(Math.max(0, indexToRemove - 1));
+      pushContentUpdateToWorker(undefined, updated);
     }
   };
 
@@ -355,6 +403,7 @@ export default function Home() {
     const updated = [...templateList];
     updated[index] = val;
     setTemplateList(updated);
+    pushContentUpdateToWorker(undefined, updated);
   };
 
   const handleStartCampaign = (e: React.FormEvent) => {
@@ -367,8 +416,8 @@ export default function Home() {
       return;
     }
 
-    const hasSubject = subjectList.some((s) => s.trim().length > 0);
-    if (!hasSubject) {
+    const cleanSubs = subjectList.map(s => s.trim()).filter(s => s.length > 0);
+    if (cleanSubs.length === 0) {
       alert("Please enter at least one Subject Line!");
       return;
     }
@@ -397,7 +446,6 @@ export default function Home() {
     }
 
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
-    // उपयोगकर्ता द्वारा सेट किया गया लॉट साइज ही इस्तेमाल होगा
     const targetLotSize = batchSize > 0 ? batchSize : DEFAULT_BATCH_SIZE;
 
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(result.validEmails));
@@ -409,6 +457,8 @@ export default function Home() {
     setSendersUsedRounds(0);
     setFailedLeadsList([]);
     setCurrentSenderIndex(0);
+    setLiveActiveSenderEmail(activeSenders[0].email);
+    setLiveActiveSenderName(activeSenders[0].senderName || "Sender");
     setIsCampaignStarted(true);
     setLoading(true);
 
@@ -424,19 +474,11 @@ export default function Home() {
       payload: {
         currentQueue: result.validEmails,
         sendersList: activeSenders,
-        peerReceivers: peerReceivers.length > 0 ? peerReceivers : activeSenders,
-        senderIdx: 0,
-        roundsDone: 0,
-        currentProcessed: 0,
-        currentSuccess: 0,
         targetLotSize,
         mode: accountAgeMode,
-        activeEmail: activeSenders[0].email,
-        activePass: activeSenders[0].appPassword,
-        activeName: activeSenders[0].senderName || "Colleague",
         rotationMode,
         pauseAfterNSenders,
-        subjectList,
+        subjectList: cleanSubs,
         template: validTemplates[0],
         templateList: validTemplates,
         customSignoffName,
@@ -453,31 +495,24 @@ export default function Home() {
     if (loading || pendingEmails.length === 0) return;
 
     setLoading(true);
-    const currentSender = inMemorySenders[currentSenderIndex % inMemorySenders.length] || inMemorySenders[0];
     const currentModeConfig = MODE_CONFIGS[accountAgeMode];
     const targetLotSize = batchSize > 0 ? batchSize : DEFAULT_BATCH_SIZE;
     const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
     const adminKey = sessionStorage.getItem("admin_session_key") || "inboxsend_mesh_secret_2026";
+    const cleanSubs = subjectList.map(s => s.trim()).filter(s => s.length > 0);
     const validTemplates = templateList.map((t) => t.trim()).filter((t) => t.length > 0);
 
+    // 🚀 रिज्यूम पर फ्रेश सब्जेक्ट, टेम्पलेट और सेंडर्स लिस्ट भेजें ताकि वर्कर का syncContentIfChanged चले
     workerRef.current?.postMessage({
       action: "RESUME",
       payload: {
         currentQueue: pendingEmails,
         sendersList: inMemorySenders,
-        peerReceivers: peerReceivers.length > 0 ? peerReceivers : inMemorySenders,
-        senderIdx: currentSenderIndex % inMemorySenders.length,
-        roundsDone: sendersUsedRounds,
-        currentProcessed: processedCount,
-        currentSuccess: successCount,
         targetLotSize,
         mode: accountAgeMode,
-        activeEmail: currentSender.email,
-        activePass: currentSender.appPassword,
-        activeName: currentSender.senderName || "Colleague",
         rotationMode,
         pauseAfterNSenders,
-        subjectList,
+        subjectList: cleanSubs,
         template: validTemplates[0] || templateList[0],
         templateList: validTemplates.length > 0 ? validTemplates : templateList,
         customSignoffName,
@@ -493,7 +528,7 @@ export default function Home() {
     workerRef.current?.postMessage({ action: "STOP" });
     setLoading(false);
     setProgressStatus("");
-    setLastBatchMessage("Campaign paused. Scheduled background 2-way replies are still processing safely.");
+    setLastBatchMessage("Campaign paused safely. You can update subjects, templates or senders and click resume.");
   };
 
   const handleFullReset = () => {
@@ -509,6 +544,8 @@ export default function Home() {
       setSuccessCount(0);
       setSendersUsedRounds(0);
       setCurrentSenderIndex(0);
+      setLiveActiveSenderEmail("");
+      setLiveActiveSenderName("");
       setFailedLeadsList([]);
       setRawSheetData("");
       setSubjectList([""]);
@@ -529,7 +566,6 @@ export default function Home() {
     }
   };
 
-  // टियर बदलने पर रीसेट और फ्रेश लोड
   const handleLoadTierAccounts = async (tier: ProfileTier) => {
     if (!machineId) return;
 
@@ -561,6 +597,8 @@ export default function Home() {
           setSenderEmail(availableAccounts[0].email);
           setAppPassword(availableAccounts[0].appPassword);
           setSenderName(availableAccounts[0].senderName || "Colleague");
+          setLiveActiveSenderEmail(availableAccounts[0].email);
+          setLiveActiveSenderName(availableAccounts[0].senderName || "Colleague");
           setSelectedTier(tier);
           if (TIER_META[tier]?.modeMap) setAccountAgeMode(TIER_META[tier].modeMap);
           setIsVaultLoaded(true);
@@ -596,7 +634,6 @@ export default function Home() {
     await handleLoadTierAccounts(tierToSwitch);
   };
 
-  // रनिंग कैंपेन में नई लीड्स जोड़ना
   const handleAppendMoreLeads = (e: React.FormEvent) => {
     e.preventDefault();
     if (!appendLeadInput.trim()) return;
@@ -622,7 +659,6 @@ export default function Home() {
     setRawSheetData(updatedQueue.join("\n"));
     localStorage.setItem(PENDING_QUEUE_STORAGE_KEY, JSON.stringify(updatedQueue));
 
-    // वर्कर को नई लीड्स भेजें
     workerRef.current?.postMessage({
       action: "APPEND_LEADS",
       payload: { newLeads: freshLeads },
@@ -669,7 +705,6 @@ export default function Home() {
     }
   };
 
-  // ⚡ DNS MX चेकर वर्कर कॉल: लाइव प्रोग्रेस और इनपुट बॉक्स से फ़ेल लीड्स को बाहर निकालना
   const handleDnsMxVerify = () => {
     const input = (rawSheetData || "").trim();
     if (!input) {
@@ -718,7 +753,6 @@ export default function Home() {
         setIsDnsChecking(false);
         setDnsProgressText("");
 
-        // 🛑 केवल वैध लीड्स इनपुट बॉक्स और क्यू में रहेंगी (फ़ेल लीड्स बाहर निकल गईं)
         const cleanString = verifiedValidList.join("\n");
         setRawSheetData(cleanString);
         setPendingEmails(verifiedValidList);
@@ -806,6 +840,7 @@ export default function Home() {
           onReset={handleFullReset}
         />
 
+        {/* 📊 LIVE STATS GRID (हर मेल पर बिना undefined के अपडेट होगा) */}
         <CampaignStatsGrid
           totalAccountsCount={totalAccountsCount}
           sendersUsedRounds={sendersUsedRounds}
@@ -959,13 +994,16 @@ export default function Home() {
             remainingCount={remainingCount}
             handleResumeOrNextBatch={handleResumeOrNextBatch}
             loading={loading}
-            senderEmail={senderEmail}
+            // 🔥 लाइव सेंडर को पास किया गया ताकि durvesh info पर लॉक न रहे
+            senderEmail={liveActiveSenderEmail || senderEmail}
             setSenderEmail={setSenderEmail}
             sendersUsedRounds={sendersUsedRounds}
+            currentSenderIndex={currentSenderIndex}
+            totalAccountsCount={totalAccountsCount}
             handleStopCampaign={handleStopCampaign}
             handleFullReset={handleFullReset}
             isVaultLoaded={isVaultLoaded}
-            senderName={senderName}
+            senderName={liveActiveSenderName || senderName}
             setSenderName={setSenderName}
             showPassword={showPassword}
             setShowPassword={setShowPassword}

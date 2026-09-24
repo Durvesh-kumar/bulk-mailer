@@ -30,6 +30,12 @@ export default function HomeHeader({ machineId, loading, onReset }: HomeHeaderPr
           <span>📊</span> Lead Dashboard
         </Link>
         <Link
+          href="/wormup"
+          className="px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+        >
+          <span>📊</span> Wormup
+        </Link>
+        <Link
           href="/vault"
           className="px-3 py-1.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
         >

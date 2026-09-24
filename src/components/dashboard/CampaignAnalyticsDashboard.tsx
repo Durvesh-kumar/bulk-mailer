@@ -33,31 +33,36 @@ interface AnalyticsDashboardProps {
 export default function CampaignAnalyticsDashboard({
   isOpen,
   onClose,
-  diagnosticStats,
-  senderMetrics,
-  totalCold,
-  totalWarmup,
-  totalRescued,
+  diagnosticStats = { code550: 0, code552: 0, code553: 0, code554: 0, code421: 0, other: 0 },
+  senderMetrics = {},
+  totalCold = 0,
+  totalWarmup = 0,
+  totalRescued = 0,
 }: AnalyticsDashboardProps) {
   if (!isOpen) return null;
 
+  // 1. कुल बाउंस और त्रुटियों का जोड़
   const totalBounces =
-    diagnosticStats.code550 +
-    diagnosticStats.code552 +
-    diagnosticStats.code553 +
-    diagnosticStats.code554 +
-    diagnosticStats.other;
+    (diagnosticStats?.code550 || 0) +
+    (diagnosticStats?.code552 || 0) +
+    (diagnosticStats?.code553 || 0) +
+    (diagnosticStats?.code554 || 0) +
+    (diagnosticStats?.other || 0);
 
-  const totalDispatched = totalCold + totalWarmup;
-  const successfulCold = Math.max(0, totalCold - totalBounces);
+  // 2. कुल डिस्पैच और शुद्ध डिलीवरी गणना
+  const totalDispatched = Math.max(0, (totalCold || 0) + (totalWarmup || 0));
+  const successfulCold = Math.max(0, (totalCold || 0) - totalBounces);
 
-  const deliveryRate = totalCold > 0 ? Math.round((successfulCold / totalCold) * 100) : 100;
+  // 3. इनबॉक्स डिलीवरी और बाउंस रेट (Safe % Calculation)
+  const deliveryRate = totalCold > 0 ? Math.min(100, Math.round((successfulCold / totalCold) * 100)) : 100;
   const bounceRate = totalCold > 0 ? ((totalBounces / totalCold) * 100).toFixed(1) : "0.0";
 
+  // 4. ट्रैफिक कंपोजिशन प्रतिशत
   const deliveredPct = totalDispatched > 0 ? (successfulCold / totalDispatched) * 100 : 0;
   const rescuedPct = totalDispatched > 0 ? (totalRescued / totalDispatched) * 100 : 0;
   const bouncePct = totalDispatched > 0 ? (totalBounces / totalDispatched) * 100 : 0;
 
+  // 5. रेडियल गेज पैरामीटर्स
   const radius = 40;
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (deliveryRate / 100) * circumference;
@@ -146,12 +151,12 @@ export default function CampaignAnalyticsDashboard({
                 <div
                   style={{ width: `${deliveredPct}%` }}
                   className="bg-emerald-500 rounded-l-full transition-all duration-700"
-                  title={`Delivered: ${deliveredPct.toFixed(1)}%`}
+                  title={`Clean Delivered: ${deliveredPct.toFixed(1)}%`}
                 />
                 <div
                   style={{ width: `${rescuedPct}%` }}
                   className="bg-purple-500 transition-all duration-700"
-                  title={`Rescued: ${rescuedPct.toFixed(1)}%`}
+                  title={`Spam Rescued: ${rescuedPct.toFixed(1)}%`}
                 />
                 <div
                   style={{ width: `${bouncePct}%` }}
@@ -178,11 +183,11 @@ export default function CampaignAnalyticsDashboard({
 
             <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-800/80 mt-3 text-center">
               <div>
-                <span className="text-[10px] text-slate-400 block font-mono">Cold Leads</span>
+                <span className="text-[10px] text-slate-400 block font-mono">Clean Delivered</span>
                 <span className="text-base font-bold text-emerald-400">{successfulCold}</span>
               </div>
               <div>
-                <span className="text-[10px] text-slate-400 block font-mono">Warmup Rescues</span>
+                <span className="text-[10px] text-slate-400 block font-mono">Spam Rescued</span>
                 <span className="text-base font-bold text-purple-400">{totalRescued}</span>
               </div>
               <div>
@@ -205,11 +210,11 @@ export default function CampaignAnalyticsDashboard({
 
           <div className="space-y-3 font-mono text-xs">
             {[
-              { label: "550 User Not Found / Dead Mailbox", count: diagnosticStats.code550, color: "bg-rose-500" },
-              { label: "553 Invalid Syntax / Relay Denied", count: diagnosticStats.code553, color: "bg-amber-500" },
-              { label: "552 Mailbox Quota Full", count: diagnosticStats.code552, color: "bg-orange-500" },
-              { label: "554 Spam Policy Drop", count: diagnosticStats.code554, color: "bg-red-600" },
-              { label: "421 Server Deferred / Rate Limit", count: diagnosticStats.code421, color: "bg-sky-500" },
+              { label: "550 User Not Found / Dead Mailbox", count: diagnosticStats.code550 || 0, color: "bg-rose-500" },
+              { label: "553 Invalid Syntax / Relay Denied", count: diagnosticStats.code553 || 0, color: "bg-amber-500" },
+              { label: "552 Mailbox Quota Full", count: diagnosticStats.code552 || 0, color: "bg-orange-500" },
+              { label: "554 Spam Policy Drop", count: diagnosticStats.code554 || 0, color: "bg-red-600" },
+              { label: "421 Server Deferred / Rate Limit", count: diagnosticStats.code421 || 0, color: "bg-sky-500" },
             ].map((bar) => {
               const pct = totalBounces > 0 ? (bar.count / totalBounces) * 100 : 0;
               return (
@@ -237,15 +242,20 @@ export default function CampaignAnalyticsDashboard({
           </h3>
 
           <div className="space-y-2.5">
-            {Object.values(senderMetrics).length === 0 ? (
+            {!senderMetrics || Object.values(senderMetrics).length === 0 ? (
               <div className="text-center py-6 text-slate-500 text-xs font-mono">
                 No active sender data dispatched yet.
               </div>
             ) : (
               Object.values(senderMetrics).map((s) => {
-                const total = s.coldSent + s.warmupSent;
-                const spamRatio = total > 0 ? (s.spamRescued / total) * 100 : 0;
-                const bounceRatio = total > 0 ? (s.bouncesHit / total) * 100 : 0;
+                const cold = s.coldSent || 0;
+                const warmup = s.warmupSent || 0;
+                const total = cold + warmup;
+                const rescued = s.spamRescued || 0;
+                const bounces = s.bouncesHit || 0;
+
+                const spamRatio = total > 0 ? (rescued / total) * 100 : 0;
+                const bounceRatio = total > 0 ? (bounces / total) * 100 : 0;
 
                 const isCritical = spamRatio > 20 || bounceRatio > 15;
                 const isWarning = spamRatio > 8 || bounceRatio > 8;
@@ -302,11 +312,11 @@ export default function CampaignAnalyticsDashboard({
                       </div>
                       <div className="bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
                         <span className="text-[10px] text-purple-400 block">Rescued</span>
-                        <span className="font-bold text-purple-300">{s.spamRescued}</span>
+                        <span className="font-bold text-purple-300">{rescued}</span>
                       </div>
                       <div className="bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
                         <span className="text-[10px] text-rose-400 block">Bounces</span>
-                        <span className="font-bold text-rose-300">{s.bouncesHit}</span>
+                        <span className="font-bold text-rose-300">{bounces}</span>
                       </div>
                     </div>
                   </div>
