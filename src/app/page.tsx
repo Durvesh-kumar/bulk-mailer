@@ -141,7 +141,7 @@ export default function Home() {
     try {
       const savedSession = localStorage.getItem(SESSION_TOKEN_KEY) || "";
       await fetch("/api/smtp-vault/sync-timestamps", {
-        method: "POST",
+        method: "PATCH",
         headers: { "Content-Type": "application/json", "x-session-token": savedSession },
         body: JSON.stringify({ machineId, timestamps: usedTimes }),
       });
@@ -209,7 +209,6 @@ export default function Home() {
     return mins > 0 ? `~${mins}m ${secs}s` : `~${secs}s`;
   }, [pendingEmails.length]);
 
-  // 🔄 जब भी कैंपेन चलते समय सब्जेक्ट या टेम्पलेट बदले जाएँ, वर्कर को तुरंत सिंक करें
   const pushContentUpdateToWorker = (newSubjects?: string[], newTemplates?: string[]) => {
     if (!workerRef.current) return;
     workerRef.current.postMessage({
@@ -232,7 +231,6 @@ export default function Home() {
         if (domLiveStatusRef.current) domLiveStatusRef.current.innerText = payload.text;
         else setProgressStatus(payload.text);
 
-        // 🔥 लाइव सेंडर और टर्न को हर मैसेज पर तुरंत स्टेट में सेट करें
         if (payload.activeSenderEmail) {
           setLiveActiveSenderEmail(payload.activeSenderEmail);
         }
@@ -254,17 +252,14 @@ export default function Home() {
       if (type === "TELEMETRY_UPDATE" || type === "BATCH_CHUNK_DONE") {
         const p = payload || {};
 
-        // 🎯 1. चालू सेंडर को लाइव अपडेट करो
         if (p.activeSenderEmail) setLiveActiveSenderEmail(p.activeSenderEmail);
         if (p.activeSenderName) setLiveActiveSenderName(p.activeSenderName);
 
-        // 🎯 2. टर्न और राउंड को लाइव अपडेट करो
         if (p.turnsDone !== undefined) setSendersUsedRounds(p.turnsDone);
         else if (p.sendersUsedRounds !== undefined) setSendersUsedRounds(p.sendersUsedRounds);
 
         if (p.currentSenderIndex !== undefined) setCurrentSenderIndex(p.currentSenderIndex);
 
-        // 🎯 3. प्रोसेस्ड, डिलीवर्ड और क्यू
         const proc = p.processed ?? p.processedCount ?? p.instantProcessed ?? 0;
         const deliv = p.delivered ?? p.successCount ?? p.instantSuccess ?? 0;
         const failed = p.failed ?? p.failedCount ?? 0;
@@ -296,6 +291,22 @@ export default function Home() {
         if (p.totalRescuedCount !== undefined) setTotalRescuedCount(p.totalRescuedCount);
       }
 
+      // 🎯 जैसे ही सेंडर का लॉट पूरा हो, स्क्रीन पर तुरंत कूलडाउन टाइमर शुरू करो
+      if (type === "SENDER_LOT_COMPLETED") {
+        const finishedEmail = payload?.email || "";
+        setCooldownTierLabel(finishedEmail);
+        setCooldownRemainingMs(COOLDOWN_HOURS_MS);
+        setLastBatchMessage(payload?.message || `Sender [${finishedEmail}] completed lot target. Resting for 24h.`);
+      }
+
+      // 🎯 जब पूरा बैच / टारगेट खत्म हो, तब एक बार में डेटाबेस को अपडेट करो
+      if (type === "FLUSH_BATCH_TIMESTAMPS") {
+        const batch = payload?.completedSendersBatch;
+        if (batch && Object.keys(batch).length > 0) {
+          syncSenderTimestamps(batch);
+        }
+      }
+
       if (type === "SENDERS_EXHAUSTED") {
         setLoading(false);
         alert(message || "All sender accounts have completed their lot limits! Please load or append more senders.");
@@ -306,11 +317,9 @@ export default function Home() {
         alert(message || "All leads have been processed! You can append more leads to resume.");
       }
 
+      // 🛑 बीच में पॉज़ दबाने पर कोई DB सिंक नहीं होगा
       if (type === "PAUSED") {
         setLoading(false);
-        if (payload?.senderProcessedTimes) {
-          syncSenderTimestamps(payload.senderProcessedTimes);
-        }
       }
 
       if (type === "PAUSE_REQUIRED") {
@@ -323,10 +332,6 @@ export default function Home() {
         setProgressStatus("");
         if (payload?.diagnosticStats) setDiagnosticStats(payload.diagnosticStats);
         if (payload?.senderMetrics) setSenderMetrics(payload.senderMetrics);
-
-        if (payload?.senderProcessedTimes) {
-          syncSenderTimestamps(payload.senderProcessedTimes);
-        }
 
         if (payload?.isQueueEmpty) {
           setIsCampaignStarted(false);
@@ -502,7 +507,6 @@ export default function Home() {
     const cleanSubs = subjectList.map(s => s.trim()).filter(s => s.length > 0);
     const validTemplates = templateList.map((t) => t.trim()).filter((t) => t.length > 0);
 
-    // 🚀 रिज्यूम पर फ्रेश सब्जेक्ट, टेम्पलेट और सेंडर्स लिस्ट भेजें ताकि वर्कर का syncContentIfChanged चले
     workerRef.current?.postMessage({
       action: "RESUME",
       payload: {
@@ -840,7 +844,7 @@ export default function Home() {
           onReset={handleFullReset}
         />
 
-        {/* 📊 LIVE STATS GRID (हर मेल पर बिना undefined के अपडेट होगा) */}
+        {/* 📊 Live Stats Grid */}
         <CampaignStatsGrid
           totalAccountsCount={totalAccountsCount}
           sendersUsedRounds={sendersUsedRounds}
@@ -871,7 +875,7 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Cooldown Alert Banner */}
+        {/* ⏳ Cooldown Alert Banner (Live Countdown Timer) */}
         {cooldownRemainingMs !== null && cooldownRemainingMs > 0 && (
           <div className="bg-amber-950/40 border border-amber-500/40 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-xl">
             <div className="flex items-center gap-3">
@@ -994,7 +998,6 @@ export default function Home() {
             remainingCount={remainingCount}
             handleResumeOrNextBatch={handleResumeOrNextBatch}
             loading={loading}
-            // 🔥 लाइव सेंडर को पास किया गया ताकि durvesh info पर लॉक न रहे
             senderEmail={liveActiveSenderEmail || senderEmail}
             setSenderEmail={setSenderEmail}
             sendersUsedRounds={sendersUsedRounds}
