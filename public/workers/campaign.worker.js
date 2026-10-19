@@ -41,6 +41,9 @@ let senderProcessedTimes = {};
 let completedSendersCount = 0;
 let currentSenderIndex = 0;
 
+// ⚡ टारगेट पूरा होने पर सिंगल बैच में भेजने के लिए बफ़र
+let batchCompletedSenders = {};
+
 let senderCooldownMap = {};
 const COOLDOWN_HOURS = 24;
 
@@ -263,12 +266,17 @@ async function runCampaignWorkflow() {
     if (currentSent >= targetLotSize) {
       completedSendersCount++;
       const exitTimestamp = Date.now();
+      const isoTime = new Date(exitTimestamp).toISOString();
+
       senderCooldownMap[rawSenderEmail] = {
         email: rawSenderEmail,
         exitedAt: exitTimestamp,
         cooldownUntil: exitTimestamp + COOLDOWN_HOURS * 60 * 60 * 1000,
         status: "COOLING_DOWN",
       };
+
+      // 🛑 तुरंत DB कॉल नहीं जाएगी—केवल बफ़र में जुड़ेगा
+      batchCompletedSenders[rawSenderEmail] = isoTime;
 
       self.postMessage({
         type: "SENDER_LOT_COMPLETED",
@@ -365,8 +373,9 @@ async function runCampaignWorkflow() {
       });
 
       const updatedCount = currentSent + 1;
+      const currentIsoTime = new Date().toISOString();
       senderSentCount[rawSenderEmail] = updatedCount;
-      senderProcessedTimes[rawSenderEmail] = new Date().toISOString();
+      senderProcessedTimes[rawSenderEmail] = currentIsoTime;
 
       let senderJustCompletedLot = false;
 
@@ -381,6 +390,9 @@ async function runCampaignWorkflow() {
           cooldownUntil: exitTimestamp + COOLDOWN_HOURS * 60 * 60 * 1000,
           status: "COOLING_DOWN",
         };
+
+        // 🛑 सिर्फ बफ़र में जोड़ें—DB पर कोई हिट नहीं
+        batchCompletedSenders[rawSenderEmail] = currentIsoTime;
 
         self.postMessage({
           type: "SENDER_LOT_COMPLETED",
@@ -468,6 +480,19 @@ async function runCampaignWorkflow() {
   }
 
   isRunning = false;
+
+  // 🎯 जब पूरा टारगेट समाप्त हो जाए (लीड्स या सेंडर्स खत्म हो जाएं), केवल तभी एकमुश्त बैच पैच भेजें
+  const hasFinishedTarget = currentQueue.length === 0 || sendersList.length === 0;
+  if (hasFinishedTarget && Object.keys(batchCompletedSenders).length > 0) {
+    self.postMessage({
+      type: "FLUSH_BATCH_TIMESTAMPS",
+      payload: {
+        completedSendersBatch: { ...batchCompletedSenders }
+      }
+    });
+    batchCompletedSenders = {}; // बफ़र खाली
+  }
+
   self.postMessage({
     type: "QUEUE_FINISHED_OR_STOPPED",
     payload: {
@@ -511,7 +536,7 @@ self.onmessage = async (e) => {
     return;
   }
 
-  // 3. नए सेंडर्स जोड़ना (APPEND_SENDERS - सेंडर खत्म होने पर नया माल झोंकना)
+  // 3. नए सेंडर्स जोड़ना (APPEND_SENDERS)
   if (action === "APPEND_SENDERS") {
     if (Array.isArray(payload.newSendersList) && payload.newSendersList.length > 0) {
       payload.newSendersList.forEach((s) => {
@@ -564,17 +589,15 @@ self.onmessage = async (e) => {
     return;
   }
 
-  // 🚀 5. START या RESUME (यहाँ स्टॉप के बाद का नया डेटा ऑटो-चेक होगा)
+  // 🚀 5. START या RESUME
   if (action === "START" || action === "RESUME") {
     isRunning = true;
     isPaused = false;
     isStopRequested = false;
 
-    // 🔥 अगर स्टॉप के दौरान सब्जेक्ट, टेम्पलेट या सेंडर बदले हैं तो तुरंत री-सिंक
     if (payload) {
       syncContentIfChanged(payload.subjectList, payload.templateList, payload.template);
 
-      // अगर रिज़्यूम पर नए सेंडर या लीड्स भेजी गई हैं तो सिंक करें
       if (Array.isArray(payload.sendersList) && payload.sendersList.length > 0) {
         sendersList = [...payload.sendersList];
       }
@@ -615,6 +638,7 @@ self.onmessage = async (e) => {
 
       senderSentCount = {};
       senderProcessedTimes = {};
+      batchCompletedSenders = {};
       currentSenderIndex = 0;
       completedSendersCount = 0;
 
@@ -626,11 +650,12 @@ self.onmessage = async (e) => {
     await runCampaignWorkflow();
   }
 
+  // 🛑 PAUSE / STOP: कोई डेटाबेस सिंक पेलोड नहीं भेजा जाएगा
   if (action === "STOP" || action === "PAUSE") {
     isStopRequested = true;
     isPaused = true;
     isRunning = false;
-    self.postMessage({ type: "PAUSED", payload: { senderProcessedTimes } });
+    self.postMessage({ type: "PAUSED" });
   }
 
   if (action === "RESET") {
@@ -642,6 +667,7 @@ self.onmessage = async (e) => {
     sendersList = [];
     senderSentCount = {};
     senderProcessedTimes = {};
+    batchCompletedSenders = {};
     senderCooldownMap = {};
     diagnosticTelemetry = { code550: 0, code552: 0, code553: 0, code554: 0, code421: 0, other: 0 };
     senderHealthMap = {};
